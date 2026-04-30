@@ -1,0 +1,50 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+agi/.env
+agi/.env.*
+!agi/.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Runtime logs and generated call artifacts
+logs/
+!logs/.gitkeep
+*.jsonl
+*.wav
+*.slin
+*.ulaw
+*.alaw
+
+# Asterisk local/runtime artifacts
+asterisk/certs/*
+!asterisk/certs/.gitkeep
+asterisk/*.bak
+asterisk/*.tmp
+
+# Docker and local tooling
+*.log
+docker-compose.override.yml
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

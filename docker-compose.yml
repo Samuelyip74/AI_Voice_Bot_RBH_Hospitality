@@ -1,0 +1,37 @@
+services:
+  asterisk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aivoicebot-asterisk:latest
+    container_name: aivoicebot-asterisk
+    user: root
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - "5060:5060/udp"
+      - "5061:5061/tcp"
+      - "20000-20099:20000-20099/udp"
+    env_file:
+      - ./agi/.env
+    volumes:
+      - ./asterisk/pjsip.conf.template:/etc/asterisk/pjsip.conf.template:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/modules.conf:/etc/asterisk/modules.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./asterisk/certs:/etc/asterisk/certs:ro
+      - ./agi:/var/lib/asterisk/agi-bin
+      - ./logs:/var/log/asterisk/ai
+      - asterisk_sounds_ai:/var/lib/asterisk/sounds/ai
+    command: >
+      sh -c "export ASTERISK_EXTERNAL_IP=$${ASTERISK_EXTERNAL_IP:-175.156.147.114};
+             export ASTERISK_LAN_IP=$${ASTERISK_LAN_IP:-192.168.0.58};
+             export ASTERISK_LOCAL_NET=$${ASTERISK_LOCAL_NET:-192.168.0.0/24};
+             envsubst '$$ASTERISK_EXTERNAL_IP $$ASTERISK_LAN_IP $$ASTERISK_LOCAL_NET' < /etc/asterisk/pjsip.conf.template > /etc/asterisk/pjsip.conf;
+             chmod +x /var/lib/asterisk/agi-bin/voice_assistant_eagi.py || true;
+             mkdir -p /var/log/asterisk/cdr-csv /var/log/asterisk/ai/calls;
+             chown -R asterisk:asterisk /var/lib/asterisk/sounds/ai /var/log/asterisk/ai /var/log/asterisk/cdr-csv || true;
+             exec su -s /bin/sh asterisk -c 'asterisk -f -vvv'"
+
+volumes:
+  asterisk_sounds_ai:
