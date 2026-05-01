@@ -134,18 +134,18 @@ pytest
 ```env
 OPENAI_API_KEY=
 OPENAI_REALTIME_MODEL=gpt-realtime
-ASTERISK_EXTERNAL_IP=175.156.147.114
-ASTERISK_LAN_IP=192.168.0.58
-ASTERISK_LOCAL_NET=192.168.0.0/24
+ASTERISK_EXTERNAL_IP=<external_ip_address>
+ASTERISK_LAN_IP=<internal_ip_address>
+ASTERISK_LOCAL_NET=<internal_lan_network>
 ASTERISK_SOUNDS_DIR=/var/lib/asterisk/sounds/ai
 RECORD_AUDIO=false
 DEFAULT_LANGUAGE=en
 SILENCE_TIMEOUT_MS=900
 MAX_UTTERANCE_SECONDS=15
-TRANSFER_EXTENSION=1920
-HUMAN_TRANSFER_EXTENSION=1920
-ROOM_SERVICE_TRANSFER_EXTENSION=1921
-TRANSFER_TARGET_TEMPLATE=sip:{extension}@313.apac1.sip.openrainbow.com
+TRANSFER_EXTENSION=<transfer_extension>
+HUMAN_TRANSFER_EXTENSION=<human_agent>
+ROOM_SERVICE_TRANSFER_EXTENSION=<room_service_extension>
+TRANSFER_TARGET_TEMPLATE=sip:{extension}@<external_sip_domain>
 LOG_LEVEL=INFO
 ```
 
@@ -198,3 +198,21 @@ Asterisk cannot play generated audio:
 ## Prototype Limits
 
 This is intentionally half-duplex and turn-based. It is suitable for validating SIP registration, EAGI audio access, Realtime API integration, multilingual context, and transfer behavior. For production, add barge-in, better RTP/media handling, structured observability, secrets management, and stricter call-flow recovery.
+
+
+## Troubleshooting
+docker compose exec asterisk asterisk -rvvvvv
+
+To turn on
+
+pjsip set logger on
+core set verbose 5
+core set debug 5
+rtp set debug on
+
+To turn off
+
+pjsip set logger off
+rtp set debug off
+core set debug 0
+rtp set debug off

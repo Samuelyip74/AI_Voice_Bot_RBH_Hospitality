@@ -21,6 +21,12 @@ SUPPORTED_LANGUAGES = {
     "th": "Thai",
     "vi": "Vietnamese",
     "id": "Indonesian",
+    "fr": "French",
+    "es": "Spanish",
+    "de": "German",
+    "it": "Italian",
+    "ar": "Arabic",
+    "hi": "Hindi",
 }
 
 LANGUAGE_RESPONSE_INSTRUCTIONS = {
@@ -34,6 +40,12 @@ LANGUAGE_RESPONSE_INSTRUCTIONS = {
     "th": "Respond only in Thai.",
     "vi": "Respond only in Vietnamese.",
     "id": "Respond only in Indonesian.",
+    "fr": "Respond only in French.",
+    "es": "Respond only in Spanish.",
+    "de": "Respond only in German.",
+    "it": "Respond only in Italian.",
+    "ar": "Respond only in Arabic.",
+    "hi": "Respond only in Hindi.",
 }
 
 TRANSFER_TRIGGER_PATTERNS = [
@@ -81,20 +93,53 @@ URGENT_TRANSFER_PATTERNS = [
 ]
 
 LANGUAGE_HINTS = [
-    ("zh-yue", ["唔", "咩", "係", "冇", "廣東話", "粤语", "粵語"]),
-    ("zh", ["你好", "谢谢", "請", "请", "中文", "普通话", "嗎", "吗"]),
-    ("ms", ["terima kasih", "bahasa melayu", "tolong", "saya mahu", "apa khabar"]),
+    ("zh-yue", ["唔", "咩", "係", "冇", "嘅", "喺", "佢", "哋", "而家", "廣東話", "粤语", "粵語"]),
+    ("zh", ["你好", "谢谢", "謝謝", "请", "請", "中文", "普通话", "普通話", "吗", "嗎"]),
+    ("ms", ["bahasa melayu", "apa khabar", "saya mahu", "saya nak", "boleh bantu", "terima kasih"]),
     ("ta", ["வணக்கம்", "நன்றி", "தமிழ்", "தயவு செய்து"]),
-    ("ja", ["こんにちは", "ありがとう", "日本語", "お願いします"]),
-    ("ko", ["안녕하세요", "감사합니다", "한국어", "주세요"]),
+    ("ja", ["こんにちは", "ありがとう", "日本語", "お願いします", "予約"]),
+    ("ko", ["안녕하세요", "감사합니다", "한국어", "주세요", "예약"]),
     ("th", ["สวัสดี", "ขอบคุณ", "ภาษาไทย", "กรุณา"]),
-    ("vi", ["xin chào", "cảm ơn", "tiếng việt", "vui lòng"]),
-    ("id", ["terima kasih", "bahasa indonesia", "tolong", "saya ingin"]),
+    ("vi", ["xin chào", "cảm ơn", "tiếng việt", "vui lòng", "làm ơn"]),
+    ("id", ["bahasa indonesia", "saya ingin", "saya mau", "tolong bantu", "terima kasih"]),
+    ("fr", ["bonjour", "merci", "s'il vous plaît", "je voudrais", "pouvez-vous"]),
+    ("es", ["hola", "gracias", "por favor", "quisiera", "puede ayudarme"]),
+    ("de", ["guten tag", "danke", "bitte", "ich möchte", "können sie"]),
+    ("it", ["buongiorno", "grazie", "per favore", "vorrei", "può aiutarmi"]),
+    ("ar", ["مرحبا", "شكرا", "من فضلك", "أريد", "العربية"]),
+    ("hi", ["नमस्ते", "धन्यवाद", "कृपया", "मदद", "हिन्दी", "हिंदी"]),
 ]
+
+LATIN_LANGUAGE_MARKERS = {
+    "ms": {"saya", "mahu", "nak", "boleh", "bilik", "makan", "tolong", "terima", "kasih"},
+    "id": {"saya", "ingin", "mau", "kamar", "makanan", "tolong", "bahasa", "indonesia"},
+    "vi": {"xin", "chào", "cảm", "ơn", "vui", "lòng", "phòng", "tiếng", "việt"},
+    "fr": {"bonjour", "merci", "voudrais", "chambre", "réservation", "s'il", "plaît"},
+    "es": {"hola", "gracias", "favor", "quisiera", "habitación", "reserva", "ayuda"},
+    "de": {"guten", "danke", "bitte", "möchte", "zimmer", "reservierung", "hilfe"},
+    "it": {"buongiorno", "grazie", "favore", "vorrei", "camera", "prenotazione", "aiuto"},
+    "en": {"hello", "hi", "please", "thanks", "room", "reservation", "help", "front", "desk"},
+}
+
+SCRIPT_PATTERNS = {
+    "ta": re.compile(r"[\u0b80-\u0bff]"),
+    "ja": re.compile(r"[\u3040-\u30ff]"),
+    "ko": re.compile(r"[\uac00-\ud7af]"),
+    "th": re.compile(r"[\u0e00-\u0e7f]"),
+    "ar": re.compile(r"[\u0600-\u06ff]"),
+    "hi": re.compile(r"[\u0900-\u097f]"),
+}
+
+CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+CANTONESE_PATTERN = re.compile(r"[唔咩係冇嘅喺佢哋]|而家|廣東話|粤语|粵語")
+VIETNAMESE_DIACRITIC_PATTERN = re.compile(
+    r"[ăâêôơưđáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
+    re.IGNORECASE,
+)
 
 
 def detect_language_from_text(text: str, default: str = "en") -> tuple[str, float]:
-    """Small deterministic language detector used as a guardrail around model metadata."""
+    """Deterministic language detector used as a guardrail around model behavior."""
     normalized = text.strip().lower()
     if not normalized:
         return default, 0.0
@@ -103,16 +148,29 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
         if any(hint.lower() in normalized for hint in hints):
             return code, 0.88
 
-    if re.search(r"[\u4e00-\u9fff]", text):
-        return "zh", 0.74
-    if re.search(r"[\u0b80-\u0bff]", text):
-        return "ta", 0.86
-    if re.search(r"[\u3040-\u30ff]", text):
-        return "ja", 0.86
-    if re.search(r"[\uac00-\ud7af]", text):
-        return "ko", 0.86
-    if re.search(r"[\u0e00-\u0e7f]", text):
-        return "th", 0.86
+    for code, pattern in SCRIPT_PATTERNS.items():
+        if pattern.search(text):
+            return code, 0.9
+
+    if CJK_PATTERN.search(text):
+        if CANTONESE_PATTERN.search(text):
+            return "zh-yue", 0.86
+        return "zh", 0.78
+
+    if VIETNAMESE_DIACRITIC_PATTERN.search(text):
+        return "vi", 0.84
+
+    words = set(re.findall(r"[a-zA-ZÀ-ÿ']+", normalized))
+    if words:
+        scored = sorted(
+            ((len(words & markers), code) for code, markers in LATIN_LANGUAGE_MARKERS.items()),
+            reverse=True,
+        )
+        best_score, best_code = scored[0]
+        if best_score >= 2:
+            return best_code, min(0.92, 0.62 + best_score * 0.08)
+        if best_score == 1 and best_code != "en":
+            return best_code, 0.62
 
     return default, 0.55
 

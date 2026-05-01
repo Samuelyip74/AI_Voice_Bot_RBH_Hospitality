@@ -8,7 +8,13 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from call_session import CallSession, detect_language_from_text, determine_transfer_action, language_response_instruction
+from call_session import (
+    SUPPORTED_LANGUAGES,
+    CallSession,
+    detect_language_from_text,
+    determine_transfer_action,
+    language_response_instruction,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -203,11 +209,13 @@ class OpenAIRealtimeClient:
         return buffered_events
 
     def _turn_instructions(self, session: CallSession) -> str:
-        language_name = session.preferred_language
+        language_code = session.preferred_language
+        language_name = SUPPORTED_LANGUAGES.get(language_code, language_code)
         return (
-            f"Detected caller language code for this turn: {language_name}. "
-            f"{language_response_instruction(language_name)} "
-            "If the caller explicitly asks to use another language, switch to that requested language immediately. "
+            f"Detected caller language for this turn: {language_name} ({language_code}). "
+            f"{language_response_instruction(language_code)} "
+            "This turn's detected language overrides prior conversation language. "
+            "If the guest explicitly asks to use another language, switch to that requested language immediately. "
             "Keep the response concise for a phone call."
         )
 
