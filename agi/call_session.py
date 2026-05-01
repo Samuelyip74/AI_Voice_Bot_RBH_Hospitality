@@ -66,18 +66,13 @@ TRANSFER_TRIGGER_PATTERNS = [
     r"\breal person\b",
 ]
 
-ROOM_SERVICE_TRIGGER_PATTERNS = [
-    r"\broom service\b",
-    r"\bin-room dining\b",
-    r"\border food\b",
-    r"\bsend food\b",
-    r"\bbreakfast in (my|the) room\b",
-    r"\bdining delivery\b",
-    r"\bfood to my room\b",
-    r"\bmodify .* dining order\b",
-    r"\bcancel .* dining order\b",
-    r"\bcheck .* dining order\b",
-    r"\bcomplain .* dining order\b",
+ROOM_SERVICE_TRANSFER_PATTERNS = [
+    r"\bconnect me to (room service|in-room dining)\b",
+    r"\btransfer me to (room service|in-room dining)\b",
+    r"\bspeak to (room service|in-room dining)\b",
+    r"\btalk to (room service|in-room dining)\b",
+    r"\broom service (agent|staff|team|person)\b",
+    r"\bin-room dining (agent|staff|team|person)\b",
 ]
 
 URGENT_TRANSFER_PATTERNS = [
@@ -194,12 +189,12 @@ def determine_transfer_action(
     room_service_extension: str = "1921",
 ) -> dict[str, str] | None:
     normalized = text.lower()
-    for pattern in ROOM_SERVICE_TRIGGER_PATTERNS:
+    for pattern in ROOM_SERVICE_TRANSFER_PATTERNS:
         if re.search(pattern, normalized):
             return {
                 "action": "transfer",
                 "extension": room_service_extension,
-                "reason": "guest requested room service or in-room dining",
+                "reason": "guest explicitly requested room service or in-room dining staff",
                 "transfer_type": "room_service",
             }
     for pattern in TRANSFER_TRIGGER_PATTERNS:

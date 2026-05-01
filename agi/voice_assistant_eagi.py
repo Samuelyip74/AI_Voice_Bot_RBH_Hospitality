@@ -5,11 +5,16 @@ import asyncio
 import logging
 import math
 import os
+import signal
 import struct
 import sys
 import time
 import traceback
+import json
+import smtplib
 from pathlib import Path
+from email.message import EmailMessage
+from urllib import request
 
 from dotenv import load_dotenv
 
@@ -25,6 +30,9 @@ load_dotenv(override=True)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(stream=sys.stderr, level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOGGER = logging.getLogger("voice_assistant_eagi")
+
+CURRENT_SESSION: CallSession | None = None
+TRANSCRIPT_EMAIL_SENT = False
 
 
 TRANSFER_PHRASES = {
@@ -91,6 +99,22 @@ def agi_command(command: str) -> str:
     return response
 
 
+def agi_response_is_dead_channel(response: str) -> bool:
+    return response.startswith("511") or "dead channel" in response.lower()
+
+
+def agi_result_code(response: str) -> int | None:
+    marker = "result="
+    if marker not in response:
+        return None
+    tail = response.split(marker, 1)[1].strip()
+    token = tail.split(" ", 1)[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
 def agi_answer() -> str:
     return agi_command("ANSWER")
 
@@ -109,6 +133,18 @@ def agi_hangup() -> str:
 
 def agi_get_variable(name: str) -> str:
     return agi_command(f"GET VARIABLE {name}")
+
+
+def agi_channel_status() -> str:
+    return agi_command("CHANNEL STATUS")
+
+
+def agi_channel_is_alive() -> tuple[bool, str]:
+    response = agi_channel_status()
+    if agi_response_is_dead_channel(response):
+        return False, response
+    # CHANNEL STATUS result 6 means the channel is up. Anything else is not a live call for this EAGI loop.
+    return agi_result_code(response) == 6, response
 
 
 def agi_verbose(message: str, level: int = 1) -> str:
@@ -159,6 +195,119 @@ def normalize_transfer_extension(extension: str, transfer_type: str, human_exten
     return extension if extension.isdigit() else human_extension
 
 
+def post_hotel_request(session: CallSession, payload: dict) -> dict:
+    webhook_url = os.getenv("HOTEL_REQUEST_WEBHOOK_URL", "").strip()
+    token = os.getenv("HOTEL_REQUEST_WEBHOOK_TOKEN", "").strip()
+    body = {
+        "call_id": session.call_id,
+        "caller_id": session.caller_id,
+        "preferred_language": session.preferred_language,
+        "request": payload,
+        "submitted_at": time.time(),
+    }
+    if not webhook_url:
+        return {"sent": False, "reason": "HOTEL_REQUEST_WEBHOOK_URL is not configured", "payload": body}
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = request.Request(webhook_url, data=encoded, headers=headers, method="POST")
+    with request.urlopen(req, timeout=float(os.getenv("HOTEL_REQUEST_WEBHOOK_TIMEOUT_SECONDS", "8"))) as response:
+        response_body = response.read(4096).decode("utf-8", errors="replace")
+        return {
+            "sent": 200 <= response.status < 300,
+            "status": response.status,
+            "response": response_body,
+            "payload": body,
+        }
+
+
+def transcript_text(session: CallSession) -> str:
+    lines = [
+        f"Call ID: {session.call_id}",
+        f"Caller ID: {session.caller_id}",
+        f"Preferred language: {session.preferred_language}",
+        "",
+        "Transcript:",
+    ]
+    for event in session.history:
+        event_type = event.get("type")
+        if event_type == "user":
+            lines.append(f"Guest: {event.get('text', '')}")
+        elif event_type == "assistant":
+            lines.append(f"Assistant: {event.get('text', '')}")
+        elif event_type == "language_change":
+            lines.append(f"[Language changed to {event.get('language')} confidence={event.get('confidence')}]")
+        elif event_type == "transfer_result":
+            lines.append(f"[Transfer result: {event.get('target')} {event.get('status')} {event.get('status_protocol')}]")
+        elif event_type == "service_request_submitted":
+            lines.append(f"[Service request submitted: sent={event.get('sent')} status={event.get('status', '')}]")
+    return "\n".join(lines).strip() + "\n"
+
+
+def send_call_transcript_email(session: CallSession) -> dict:
+    enabled = os.getenv("EMAIL_TRANSCRIPT_ENABLED", "true").lower() == "true"
+    recipient = os.getenv("TRANSCRIPT_EMAIL_TO", "kahyean.yip+pdopenai@gmail.com").strip()
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    if not enabled:
+        return {"sent": False, "reason": "EMAIL_TRANSCRIPT_ENABLED is false"}
+    if not recipient:
+        return {"sent": False, "reason": "TRANSCRIPT_EMAIL_TO is not configured"}
+    if not smtp_host:
+        return {"sent": False, "reason": "SMTP_HOST is not configured"}
+
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USERNAME", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "")
+    smtp_starttls = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
+    sender = os.getenv("TRANSCRIPT_EMAIL_FROM", smtp_user or "aivoicebot@localhost").strip()
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = f"AI Voice Bot Call Transcript - {session.call_id}"
+    msg.set_content(transcript_text(session))
+
+    log_path = session.log_dir / f"{session.call_id}.jsonl"
+    if log_path.exists():
+        msg.add_attachment(
+            log_path.read_bytes(),
+            maintype="application",
+            subtype="jsonl",
+            filename=f"{session.call_id}.jsonl",
+        )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=float(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))) as smtp:
+        if smtp_starttls:
+            smtp.starttls()
+        if smtp_user or smtp_password:
+            smtp.login(smtp_user, smtp_password)
+        smtp.send_message(msg)
+
+    return {"sent": True, "to": recipient, "from": sender, "host": smtp_host, "port": smtp_port}
+
+
+def finalize_transcript_email(session: CallSession) -> None:
+    global TRANSCRIPT_EMAIL_SENT
+    if TRANSCRIPT_EMAIL_SENT:
+        return
+    TRANSCRIPT_EMAIL_SENT = True
+    try:
+        email_result = send_call_transcript_email(session)
+        session.append_event("transcript_email_result", email_result)
+    except Exception as exc:
+        LOGGER.exception("Could not send transcript email")
+        session.append_event("transcript_email_error", {"error": str(exc)})
+
+
+def handle_shutdown_signal(signum: int, _frame: object) -> None:
+    if CURRENT_SESSION is not None:
+        CURRENT_SESSION.append_event("hangup_signal", {"signal": signum})
+        finalize_transcript_email(CURRENT_SESSION)
+    raise SystemExit(0)
+
+
 async def synthesize_text_phrase(
     client: OpenAIRealtimeClient,
     session: CallSession,
@@ -206,9 +355,11 @@ async def synthesize_transfer_phrase(client: OpenAIRealtimeClient, session: Call
 
 
 async def run_call() -> int:
+    global CURRENT_SESSION
     agi_env = parse_agi_env()
     default_language = os.getenv("DEFAULT_LANGUAGE", "en")
     session = CallSession.from_agi_env(agi_env, default_language)
+    CURRENT_SESSION = session
     sounds_dir = Path(os.getenv("ASTERISK_SOUNDS_DIR", "/var/lib/asterisk/sounds/ai"))
     sounds_dir.mkdir(parents=True, exist_ok=True)
     record_audio = os.getenv("RECORD_AUDIO", "false").lower() == "true"
@@ -255,7 +406,16 @@ async def run_call() -> int:
 
     for turn in range(1, 50):
         try:
-            agi_verbose(f"AI assistant listening turn={turn}", 1)
+            alive, status_response = agi_channel_is_alive()
+            if not alive:
+                session.append_event("hangup", {"reason": "channel not alive before listening", "channel_status": status_response})
+                break
+
+            verbose_response = agi_verbose(f"AI assistant listening turn={turn}", 1)
+            if agi_response_is_dead_channel(verbose_response):
+                session.append_event("hangup", {"reason": "dead channel before listening", "agi_response": verbose_response})
+                break
+
             pcm = capture_utterance_from_fd3(
                 fd=3,
                 codec=source_codec,
@@ -276,6 +436,10 @@ async def run_call() -> int:
                             "hint": "No bytes arrived on EAGI fd 3. Check caller microphone, inbound RTP, NAT/firewall, and RTP debug.",
                         },
                     )
+                    alive, status_response = agi_channel_is_alive()
+                    if not alive:
+                        session.append_event("hangup", {"reason": "channel not alive after empty audio", "channel_status": status_response})
+                        break
                     if no_audio_turns >= no_audio_max_turns:
                         break
                     continue
@@ -328,16 +492,42 @@ async def run_call() -> int:
                         "reason": reason,
                     },
                 )
+            if result.service_request_action:
+                session.append_event("service_request_action_detected", result.service_request_action)
 
             if result.response_audio_pcm24k:
                 response_wav = asterisk_playback_wav(sounds_dir / f"{session.call_id}_{turn}.wav", result.response_audio_pcm24k)
                 playback_response = agi_stream_file(str(response_wav.with_suffix("")))
                 session.append_event("assistant_audio_played", {"turn": turn, "file": str(response_wav), "agi_response": playback_response})
+                if agi_response_is_dead_channel(playback_response):
+                    session.append_event("hangup", {"reason": "dead channel during assistant playback"})
+                    break
                 time.sleep(0.25)
             else:
                 session.append_event("assistant_audio_missing", {"turn": turn, "text": result.response_text})
-                if not transfer:
+                if not transfer and not result.service_request_action:
                     continue
+
+            if result.service_request_action:
+                try:
+                    submission = post_hotel_request(session, result.service_request_action)
+                    session.append_event("service_request_submitted", submission)
+                    if not result.response_audio_pcm24k:
+                        if submission.get("sent"):
+                            confirmation = "Thank you. I have submitted your request to our hotel team."
+                        else:
+                            confirmation = "Thank you. I have noted the request details, but the hotel request system is not connected right now."
+                        confirmation_wav = await synthesize_text_phrase(
+                            client,
+                            session,
+                            confirmation,
+                            sounds_dir / f"{session.call_id}_{turn}_request_confirmation.wav",
+                        )
+                        agi_stream_file(str(confirmation_wav.with_suffix("")))
+                except Exception as exc:
+                    LOGGER.exception("Could not submit hotel request")
+                    session.append_event("service_request_error", {"error": str(exc), "payload": result.service_request_action})
+                continue
 
             if transfer:
                 session.request_transfer(reason or "transfer requested")
@@ -345,7 +535,10 @@ async def run_call() -> int:
                 phrase = phrase_map.get(session.preferred_language, phrase_map["en"])
                 try:
                     transfer_wav = await synthesize_transfer_phrase(client, session, phrase, sounds_dir, turn)
-                    agi_stream_file(str(transfer_wav.with_suffix("")))
+                    transfer_phrase_response = agi_stream_file(str(transfer_wav.with_suffix("")))
+                    if agi_response_is_dead_channel(transfer_phrase_response):
+                        session.append_event("hangup", {"reason": "dead channel during transfer phrase playback"})
+                        break
                 except Exception:
                     LOGGER.exception("Could not synthesize transfer phrase")
                 transfer_target = transfer_target_for_extension(target_extension)
@@ -370,6 +563,15 @@ async def run_call() -> int:
                 if transfer_failed:
                     unavailable = UNAVAILABLE_PHRASES.get(session.preferred_language, UNAVAILABLE_PHRASES["en"])
                     session.append_event("transfer_unavailable", {"message": unavailable})
+                    try:
+                        channel_status = agi_channel_status()
+                        session.append_event("channel_status_after_transfer_failure", {"response": channel_status})
+                        if agi_response_is_dead_channel(channel_status):
+                            session.append_event("hangup", {"reason": "dead channel after transfer failure"})
+                            break
+                    except Exception as exc:
+                        session.append_event("hangup", {"reason": "channel status failed after transfer", "error": str(exc)})
+                        break
                     continue
                 break
 
@@ -381,11 +583,18 @@ async def run_call() -> int:
             session.append_event("error", {"error": str(exc)})
             break
 
-    agi_hangup()
+    finalize_transcript_email(session)
+
+    try:
+        agi_hangup()
+    except Exception:
+        LOGGER.debug("Could not send AGI HANGUP after call ended", exc_info=True)
     return 0
 
 
 def main() -> int:
+    signal.signal(signal.SIGHUP, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
     try:
         return asyncio.run(run_call())
     except Exception as exc:

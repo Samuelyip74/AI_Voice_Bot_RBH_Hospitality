@@ -26,8 +26,13 @@ def test_hospitality_transfer_routes_to_concierge():
     assert action["transfer_type"] == "human"
 
 
-def test_room_service_routes_to_in_room_dining():
+def test_room_service_request_does_not_transfer_by_default():
     action = determine_transfer_action("I want room service to my room")
+    assert action is None
+
+
+def test_explicit_room_service_team_request_transfers():
+    action = determine_transfer_action("Please connect me to room service")
     assert action["extension"] == "1921"
     assert action["transfer_type"] == "room_service"
 
@@ -45,3 +50,13 @@ def test_parse_model_transfer_args(monkeypatch):
     client = OpenAIRealtimeClient()
     parsed = client._parse_transfer_args('{"action":"transfer","extension":"1920","reason":"concierge help"}')
     assert parsed == {"action": "transfer", "extension": "1920", "reason": "concierge help"}
+
+
+def test_parse_service_request_args(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = OpenAIRealtimeClient()
+    parsed = client._parse_service_request_args(
+        '{"category":"housekeeping","summary":"Clean room 1208 this afternoon","room_number":"1208","priority":"normal","language":"en","confirmed_with_guest":true}'
+    )
+    assert parsed["category"] == "housekeeping"
+    assert parsed["room_number"] == "1208"
