@@ -261,13 +261,13 @@ LATIN_LANGUAGE_MARKERS = {
 SCRIPT_PATTERNS = {
     "ta": re.compile(r"[\u0b80-\u0bff]"),
     "ja": re.compile(r"[\u3040-\u30ff]"),
-    "ko": re.compile(r"[\uac00-\ud7af]"),
     "th": re.compile(r"[\u0e00-\u0e7f]"),
-    "ar": re.compile(r"[\u0600-\u06ff]"),
     "hi": re.compile(r"[\u0900-\u097f]"),
 }
 
 CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+HANGUL_PATTERN = re.compile(r"[\uac00-\ud7af]")
+ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff]")
 CANTONESE_PATTERN = re.compile(r"[唔咩係冇嘅喺佢哋]|而家|廣東話|粤语|粵語|執房|攞|搵|房口")
 VIETNAMESE_DIACRITIC_PATTERN = re.compile(
     r"[ăâêôơưđáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
@@ -336,6 +336,20 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
     for code, pattern in SCRIPT_PATTERNS.items():
         if pattern.search(text):
             return code, 0.9
+
+    hangul_chars = HANGUL_PATTERN.findall(text)
+    if hangul_chars:
+        hangul_ratio = len(hangul_chars) / max(1, len(re.sub(r"\s+", "", text)))
+        if len(hangul_chars) >= 8 and hangul_ratio >= 0.75:
+            return "ko", 0.92
+        return "ko", 0.82
+
+    arabic_chars = ARABIC_PATTERN.findall(text)
+    if arabic_chars:
+        arabic_ratio = len(arabic_chars) / max(1, len(re.sub(r"\s+", "", text)))
+        if len(arabic_chars) >= 10 and arabic_ratio >= 0.75:
+            return "ar", 0.92
+        return "ar", 0.82
 
     if CJK_PATTERN.search(text):
         if CANTONESE_PATTERN.search(text):

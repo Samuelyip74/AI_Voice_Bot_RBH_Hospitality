@@ -114,6 +114,36 @@ def test_single_ambiguous_halo_does_not_switch_language():
     assert confidence < 0.6
 
 
+def test_short_hangul_noise_does_not_reach_switch_threshold():
+    language, confidence = detect_language_from_text("화합하게", "zh")
+    assert language == "ko"
+    assert confidence < 0.9
+
+
+def test_clear_korean_sentence_reaches_switch_threshold():
+    language, confidence = detect_language_from_text("안녕하세요 룸서비스를 부탁드립니다", "en")
+    assert language == "ko"
+    assert confidence >= 0.9
+
+
+def test_short_arabic_noise_does_not_reach_switch_threshold():
+    language, confidence = detect_language_from_text("خلى.", "zh")
+    assert language == "ar"
+    assert confidence < 0.9
+
+
+def test_single_arabic_word_noise_does_not_reach_switch_threshold():
+    language, confidence = detect_language_from_text("جمهورية", "zh")
+    assert language == "ar"
+    assert confidence < 0.9
+
+
+def test_clear_arabic_sentence_reaches_switch_threshold():
+    language, confidence = detect_language_from_text("مرحبا أريد خدمة الغرف من فضلك", "en")
+    assert language == "ar"
+    assert confidence >= 0.9
+
+
 def test_session_updates_preferred_language():
     session = CallSession(call_id="test")
     session.log_dir = Path("logs/test-calls")
