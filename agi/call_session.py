@@ -331,7 +331,7 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
 
     for code, hints in LANGUAGE_HINTS:
         if any(hint.lower() in normalized for hint in hints):
-            return code, 0.88
+            return code, 0.92
 
     for code, pattern in SCRIPT_PATTERNS.items():
         if pattern.search(text):
@@ -458,11 +458,18 @@ class CallSession:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def update_language(self, language: str, confidence: float = 1.0, source: str = "detector") -> None:
-        if language in SUPPORTED_LANGUAGES and confidence >= 0.6:
+        if language not in SUPPORTED_LANGUAGES:
+            return
+
+        switch_threshold = float(os.getenv("LANGUAGE_SWITCH_CONFIDENCE", "0.90"))
+        if language == self.preferred_language and confidence >= 0.6:
             self.detected_language = language
-            if language != self.preferred_language:
-                self.preferred_language = language
-                self.append_event("language_change", {"language": language, "confidence": confidence, "source": source})
+            return
+
+        if confidence >= switch_threshold:
+            self.detected_language = language
+            self.preferred_language = language
+            self.append_event("language_change", {"language": language, "confidence": confidence, "source": source})
 
     def request_transfer(self, reason: str) -> None:
         self.transfer_requested = True

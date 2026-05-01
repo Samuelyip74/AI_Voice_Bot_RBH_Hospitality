@@ -121,5 +121,13 @@ def test_session_updates_preferred_language():
     assert session.preferred_language == "vi"
 
 
+def test_session_does_not_switch_language_below_threshold(monkeypatch):
+    monkeypatch.setenv("LANGUAGE_SWITCH_CONFIDENCE", "0.90")
+    session = CallSession(call_id="test")
+    session.log_dir = Path("logs/test-calls")
+    session.update_language("vi", 0.89)
+    assert session.preferred_language == "en"
+
+
 def test_language_response_instruction_for_mandarin():
     assert "Mandarin Chinese" in language_response_instruction("zh")
