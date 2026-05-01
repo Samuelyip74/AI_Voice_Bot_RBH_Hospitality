@@ -54,6 +54,66 @@ def test_detects_vietnamese_text():
     assert confidence >= 0.6
 
 
+def test_detects_cantonese_hotel_cleaning_request():
+    language, confidence = detect_language_from_text("麻煩你幫我執房", "en")
+    assert language == "zh-yue"
+    assert confidence >= 0.6
+
+
+def test_detects_mandarin_hotel_cleaning_request():
+    language, confidence = detect_language_from_text("请帮我打扫房间", "en")
+    assert language == "zh"
+    assert confidence >= 0.6
+
+
+def test_detects_malay_hotel_cleaning_request():
+    language, confidence = detect_language_from_text("Tolong bersihkan bilik saya", "en")
+    assert language == "ms"
+    assert confidence >= 0.6
+
+
+def test_detects_indonesian_hotel_cleaning_request():
+    language, confidence = detect_language_from_text("Tolong bersihkan kamar saya", "en")
+    assert language == "id"
+    assert confidence >= 0.6
+
+
+def test_detects_thai_room_service_request():
+    language, confidence = detect_language_from_text("ขอรูมเซอร์วิสไปที่ห้อง", "en")
+    assert language == "th"
+    assert confidence >= 0.6
+
+
+def test_detects_french_front_desk_request():
+    language, confidence = detect_language_from_text("Bonjour, je voudrais parler à la réception", "en")
+    assert language == "fr"
+    assert confidence >= 0.6
+
+
+def test_detects_spanish_wake_up_call_request():
+    language, confidence = detect_language_from_text("Necesito una llamada de despertador", "en")
+    assert language == "es"
+    assert confidence >= 0.6
+
+
+def test_short_chinese_filler_does_not_switch_language():
+    language, confidence = detect_language_from_text("嗯。", "en")
+    assert language == "en"
+    assert confidence < 0.6
+
+
+def test_spanish_accented_noise_does_not_switch_to_vietnamese():
+    language, confidence = detect_language_from_text("razón.", "en")
+    assert language == "en"
+    assert confidence < 0.6
+
+
+def test_single_ambiguous_halo_does_not_switch_language():
+    language, confidence = detect_language_from_text("Halo,", "en")
+    assert language == "en"
+    assert confidence < 0.6
+
+
 def test_session_updates_preferred_language():
     session = CallSession(call_id="test")
     session.log_dir = Path("logs/test-calls")

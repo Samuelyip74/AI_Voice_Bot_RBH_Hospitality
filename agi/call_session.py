@@ -87,33 +87,175 @@ URGENT_TRANSFER_PATTERNS = [
     r"\burgent\b",
 ]
 
+END_CALL_PATTERNS = [
+    r"\bthat'?s all\b",
+    r"\bnothing else\b",
+    r"\bno more\b",
+    r"\bno thanks\b",
+    r"\bno thank you\b",
+    r"\bi'?m done\b",
+    r"\bthat will be all\b",
+    r"\bthank you,? bye\b",
+    r"\bthanks,? bye\b",
+    r"\bgoodbye\b",
+    r"\bbye\b",
+]
+
 LANGUAGE_HINTS = [
-    ("zh-yue", ["唔", "咩", "係", "冇", "嘅", "喺", "佢", "哋", "而家", "廣東話", "粤语", "粵語"]),
-    ("zh", ["你好", "谢谢", "謝謝", "请", "請", "中文", "普通话", "普通話", "吗", "嗎"]),
-    ("ms", ["bahasa melayu", "apa khabar", "saya mahu", "saya nak", "boleh bantu", "terima kasih"]),
-    ("ta", ["வணக்கம்", "நன்றி", "தமிழ்", "தயவு செய்து"]),
-    ("ja", ["こんにちは", "ありがとう", "日本語", "お願いします", "予約"]),
-    ("ko", ["안녕하세요", "감사합니다", "한국어", "주세요", "예약"]),
-    ("th", ["สวัสดี", "ขอบคุณ", "ภาษาไทย", "กรุณา"]),
-    ("vi", ["xin chào", "cảm ơn", "tiếng việt", "vui lòng", "làm ơn"]),
-    ("id", ["bahasa indonesia", "saya ingin", "saya mau", "tolong bantu", "terima kasih"]),
-    ("fr", ["bonjour", "merci", "s'il vous plaît", "je voudrais", "pouvez-vous"]),
-    ("es", ["hola", "gracias", "por favor", "quisiera", "puede ayudarme"]),
-    ("de", ["guten tag", "danke", "bitte", "ich möchte", "können sie"]),
-    ("it", ["buongiorno", "grazie", "per favore", "vorrei", "può aiutarmi"]),
-    ("ar", ["مرحبا", "شكرا", "من فضلك", "أريد", "العربية"]),
-    ("hi", ["नमस्ते", "धन्यवाद", "कृपया", "मदद", "हिन्दी", "हिंदी"]),
+    (
+        "zh-yue",
+        [
+            "唔", "咩", "係", "冇", "嘅", "喺", "佢", "哋", "而家", "幫我", "麻煩你",
+            "廣東話", "粤语", "粵語", "執房", "攞", "搵", "前台", "房口", "叫醒",
+        ],
+    ),
+    (
+        "zh",
+        [
+            "你好", "谢谢", "謝謝", "请", "請", "中文", "普通话", "普通話", "吗", "嗎",
+            "帮我", "幫我", "前台", "客房服务", "客房服務", "打扫房间", "打掃房間",
+            "叫醒服务", "叫醒服務", "预订", "預訂", "出租车", "計程車", "餐厅", "餐廳",
+        ],
+    ),
+    (
+        "ms",
+        [
+            "bahasa melayu", "apa khabar", "saya mahu", "saya nak", "boleh bantu",
+            "boleh tolong", "tolong bersihkan bilik", "bilik saya", "servis bilik",
+            "makanan ke bilik", "panggilan bangun", "meja depan", "kaunter penyambut tetamu",
+            "tempahan", "teksi", "sarapan", "terima kasih",
+        ],
+    ),
+    (
+        "ta",
+        [
+            "வணக்கம்", "நன்றி", "தமிழ்", "தயவு செய்து", "உதவி", "அறை", "என் அறை",
+            "அறை சேவை", "சுத்தம்", "எழுப்பும் அழைப்பு", "முன் அலுவலகம்", "முன்பதிவு",
+            "டாக்ஸி", "உணவு", "காலை உணவு",
+        ],
+    ),
+    (
+        "ja",
+        [
+            "こんにちは", "ありがとう", "日本語", "お願いします", "予約", "部屋", "客室",
+            "ルームサービス", "清掃", "掃除", "起こしてください", "モーニングコール",
+            "フロント", "タクシー", "朝食", "レストラン",
+        ],
+    ),
+    (
+        "ko",
+        [
+            "안녕하세요", "감사합니다", "한국어", "주세요", "예약", "방", "객실",
+            "룸서비스", "청소", "깨워", "모닝콜", "프런트", "택시", "아침", "식당",
+        ],
+    ),
+    (
+        "th",
+        [
+            "สวัสดี", "ขอบคุณ", "ภาษาไทย", "กรุณา", "ช่วย", "ห้อง", "รูมเซอร์วิส",
+            "ทำความสะอาด", "ปลุก", "แผนกต้อนรับ", "จอง", "แท็กซี่", "อาหารเช้า", "ร้านอาหาร",
+        ],
+    ),
+    (
+        "vi",
+        [
+            "xin chào", "cảm ơn", "tiếng việt", "vui lòng", "làm ơn", "giúp tôi",
+            "phòng của tôi", "dịch vụ phòng", "dọn phòng", "báo thức", "lễ tân",
+            "đặt phòng", "đặt bàn", "taxi", "bữa sáng", "nhà hàng",
+        ],
+    ),
+    (
+        "id",
+        [
+            "bahasa indonesia", "saya ingin", "saya mau", "tolong bantu",
+            "tolong bersihkan kamar", "kamar saya", "layanan kamar", "makanan ke kamar",
+            "panggilan bangun", "resepsionis", "meja depan", "pemesanan", "taksi",
+            "sarapan", "terima kasih",
+        ],
+    ),
+    (
+        "fr",
+        [
+            "bonjour", "merci", "s'il vous plaît", "je voudrais", "pouvez-vous",
+            "ma chambre", "service d'étage", "nettoyer la chambre", "réveil", "réception",
+            "réserver", "taxi", "petit déjeuner", "restaurant",
+        ],
+    ),
+    (
+        "es",
+        [
+            "hola", "gracias", "por favor", "quisiera", "puede ayudarme", "mi habitación",
+            "servicio a la habitación", "servicio de habitaciones", "limpiar la habitación",
+            "llamada de despertador", "recepción", "reservar", "taxi", "desayuno", "restaurante",
+        ],
+    ),
+    (
+        "de",
+        [
+            "guten tag", "hallo", "danke", "bitte", "ich möchte", "können sie",
+            "mein zimmer", "zimmerservice", "zimmer reinigen", "weckruf", "rezeption",
+            "reservieren", "taxi", "frühstück", "restaurant",
+        ],
+    ),
+    (
+        "it",
+        [
+            "buongiorno", "grazie", "per favore", "vorrei", "può aiutarmi", "la mia camera",
+            "servizio in camera", "pulire la camera", "sveglia", "reception", "prenotare",
+            "taxi", "colazione", "ristorante",
+        ],
+    ),
+    (
+        "ar",
+        [
+            "مرحبا", "شكرا", "من فضلك", "أريد", "العربية", "ساعدني", "غرفتي",
+            "خدمة الغرف", "تنظيف الغرفة", "مكالمة إيقاظ", "الاستقبال", "حجز",
+            "سيارة أجرة", "فطور", "مطعم",
+        ],
+    ),
+    (
+        "hi",
+        [
+            "नमस्ते", "धन्यवाद", "कृपया", "मदद", "हिन्दी", "हिंदी", "मेरा कमरा",
+            "रूम सर्विस", "कमरा साफ", "वेक अप कॉल", "रिसेप्शन", "बुकिंग", "टैक्सी",
+            "नाश्ता", "रेस्तरां",
+        ],
+    ),
 ]
 
 LATIN_LANGUAGE_MARKERS = {
-    "ms": {"saya", "mahu", "nak", "boleh", "bilik", "makan", "tolong", "terima", "kasih"},
-    "id": {"saya", "ingin", "mau", "kamar", "makanan", "tolong", "bahasa", "indonesia"},
-    "vi": {"xin", "chào", "cảm", "ơn", "vui", "lòng", "phòng", "tiếng", "việt"},
-    "fr": {"bonjour", "merci", "voudrais", "chambre", "réservation", "s'il", "plaît"},
-    "es": {"hola", "gracias", "favor", "quisiera", "habitación", "reserva", "ayuda"},
-    "de": {"guten", "danke", "bitte", "möchte", "zimmer", "reservierung", "hilfe"},
-    "it": {"buongiorno", "grazie", "favore", "vorrei", "camera", "prenotazione", "aiuto"},
-    "en": {"hello", "hi", "please", "thanks", "room", "reservation", "help", "front", "desk"},
+    "ms": {
+        "saya", "mahu", "nak", "boleh", "bilik", "makan", "tolong", "terima", "kasih",
+        "bersihkan", "sarapan", "teksi", "kaunter", "tempahan", "bangun",
+    },
+    "id": {
+        "saya", "ingin", "mau", "kamar", "makanan", "tolong", "bahasa", "indonesia",
+        "bersihkan", "sarapan", "taksi", "resepsionis", "pemesanan", "bangun",
+    },
+    "vi": {
+        "xin", "chào", "cảm", "ơn", "vui", "lòng", "phòng", "tiếng", "việt",
+        "dọn", "báo", "thức", "lễ", "tân", "đặt", "bữa", "sáng",
+    },
+    "fr": {
+        "bonjour", "merci", "voudrais", "chambre", "réservation", "s'il", "plaît",
+        "réception", "réveil", "nettoyer", "taxi", "petit", "déjeuner",
+    },
+    "es": {
+        "hola", "gracias", "favor", "quisiera", "habitación", "reserva", "ayuda",
+        "recepción", "despertador", "limpiar", "taxi", "desayuno",
+    },
+    "de": {
+        "guten", "hallo", "danke", "bitte", "möchte", "zimmer", "reservierung", "hilfe",
+        "rezeption", "weckruf", "reinigen", "taxi", "frühstück",
+    },
+    "it": {
+        "buongiorno", "grazie", "favore", "vorrei", "camera", "prenotazione", "aiuto",
+        "reception", "sveglia", "pulire", "taxi", "colazione",
+    },
+    "en": {
+        "hello", "hi", "please", "thanks", "room", "reservation", "help", "front", "desk",
+        "housekeeping", "cleaning", "wake", "breakfast", "restaurant", "taxi",
+    },
 }
 
 SCRIPT_PATTERNS = {
@@ -126,11 +268,49 @@ SCRIPT_PATTERNS = {
 }
 
 CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-CANTONESE_PATTERN = re.compile(r"[唔咩係冇嘅喺佢哋]|而家|廣東話|粤语|粵語")
+CANTONESE_PATTERN = re.compile(r"[唔咩係冇嘅喺佢哋]|而家|廣東話|粤语|粵語|執房|攞|搵|房口")
 VIETNAMESE_DIACRITIC_PATTERN = re.compile(
     r"[ăâêôơưđáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
     re.IGNORECASE,
 )
+VIETNAMESE_STRONG_DIACRITIC_PATTERN = re.compile(r"[ăơưđắằẳẵặớờởỡợứừửữự]", re.IGNORECASE)
+
+LOW_INFORMATION_UTTERANCES = {
+    "um",
+    "uh",
+    "er",
+    "ah",
+    "hmm",
+    "mm",
+    "mhm",
+    "嗯",
+    "嗯嗯",
+    "啊",
+    "哦",
+    "喂",
+    "唔",
+    "はい",
+    "ええ",
+    "네",
+    "예",
+}
+
+AMBIGUOUS_SINGLE_WORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "halo",
+    "hallo",
+    "hola",
+    "alo",
+    "bonjour",
+    "razon",
+    "razón",
+    "okay",
+    "ok",
+    "yes",
+    "no",
+}
 
 
 def detect_language_from_text(text: str, default: str = "en") -> tuple[str, float]:
@@ -138,6 +318,16 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
     normalized = text.strip().lower()
     if not normalized:
         return default, 0.0
+    normalized_plain = re.sub(r"[^\w\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+", "", normalized, flags=re.UNICODE)
+    words_for_guard = re.findall(r"[a-zA-ZÀ-ÿ']+", normalized)
+    cjk_chars = CJK_PATTERN.findall(text)
+
+    if normalized_plain in LOW_INFORMATION_UTTERANCES:
+        return default, 0.2
+    if len(cjk_chars) == 1 and len(normalized_plain) <= 1:
+        return default, 0.25
+    if len(words_for_guard) == 1 and words_for_guard[0].lower() in AMBIGUOUS_SINGLE_WORDS:
+        return default, 0.35
 
     for code, hints in LANGUAGE_HINTS:
         if any(hint.lower() in normalized for hint in hints):
@@ -152,7 +342,7 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
             return "zh-yue", 0.86
         return "zh", 0.78
 
-    if VIETNAMESE_DIACRITIC_PATTERN.search(text):
+    if VIETNAMESE_STRONG_DIACRITIC_PATTERN.search(text):
         return "vi", 0.84
 
     words = set(re.findall(r"[a-zA-ZÀ-ÿ']+", normalized))
@@ -178,6 +368,14 @@ def should_transfer_deterministic(text: str, failed_intent_count: int = 0, angry
     action = determine_transfer_action(text, failed_intent_count=failed_intent_count, angry=angry)
     if action:
         return True, action["reason"]
+    return False, None
+
+
+def should_end_call_deterministic(text: str) -> tuple[bool, str | None]:
+    normalized = text.lower()
+    for pattern in END_CALL_PATTERNS:
+        if re.search(pattern, normalized):
+            return True, "guest indicated there are no more requests"
     return False, None
 
 

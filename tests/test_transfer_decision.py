@@ -3,9 +3,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agi"))
 
-from call_session import determine_transfer_action, should_transfer_deterministic
+from call_session import determine_transfer_action, should_end_call_deterministic, should_transfer_deterministic
 from openai_realtime_client import OpenAIRealtimeClient
-from voice_assistant_eagi import normalize_transfer_extension
+from voice_assistant_eagi import normalize_transfer_extension, service_request_confirmation_text, service_request_is_confirmed
 
 
 def test_transfer_trigger_human_agent():
@@ -60,3 +60,32 @@ def test_parse_service_request_args(monkeypatch):
     )
     assert parsed["category"] == "housekeeping"
     assert parsed["room_number"] == "1208"
+
+
+def test_end_call_trigger_when_guest_has_no_more_requests():
+    should_end, reason = should_end_call_deterministic("No thank you, that's all. Bye.")
+    assert should_end is True
+    assert reason
+
+
+def test_parse_end_call_args(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = OpenAIRealtimeClient()
+    parsed = client._parse_end_call_args('{"action":"end_call","reason":"guest said goodbye"}')
+    assert parsed == {"action": "end_call", "reason": "guest said goodbye"}
+
+
+def test_service_request_requires_explicit_confirmation():
+    assert service_request_is_confirmed({"confirmed_with_guest": True}) is True
+    assert service_request_is_confirmed({"confirmed_with_guest": False}) is False
+    assert service_request_is_confirmed({}) is False
+
+
+def test_service_request_confirmation_text_includes_summary_and_room():
+    text = service_request_confirmation_text(
+        {"summary": "spaghetti aglio e olio", "room_number": "1002"},
+        "en",
+    )
+    assert "Please confirm" in text
+    assert "spaghetti aglio e olio" in text
+    assert "1002" in text

@@ -28,6 +28,7 @@ ASSISTANT_INSTRUCTIONS = """You are a warm, professional, multilingual Hospitali
 Primary mission:
 - Understand the guest's request, collect the minimum missing context needed to help, confirm important details, then either assist directly or route the guest to the right hotel team.
 - Do not give generic replies such as "How can I help?" after the guest has already stated a request. Move the conversation forward by asking the next useful question.
+- The system already played the initial greeting at call start. Do not reintroduce yourself as Nova again during the call unless the guest asks who you are.
 - Do not ask for all details at once. Ask one focused question at a time, prioritizing the detail that blocks progress.
 - Keep each spoken response short enough for phone playback: usually 1-3 sentences.
 
@@ -36,12 +37,13 @@ Conversation method:
 2. Extract any details already provided by the guest. Do not ask for details already known.
 3. Ask for the next missing required detail for that category.
 4. For critical details, repeat them back and ask for confirmation.
-5. For routine service requests, collect the required details and submit the request with the submit_hotel_request tool. Do not transfer only because the request category is housekeeping, room service, or front desk.
+5. For routine service requests, collect the required details, repeat the complete request back to the guest, and ask for explicit confirmation before submitting. Only call submit_hotel_request after the guest clearly confirms with words like yes, correct, confirmed, that's right, okay, please proceed, or equivalent in the guest's language.
 6. Transfer only when the guest explicitly asks to speak to, call, connect to, or be transferred to a person or team, or when there is an emergency/safety issue.
+7. When the guest clearly says there are no more requests, thanks you and says goodbye, says "that's all", "nothing else", "no more", "no thank you", "bye", or similar, give a brief courteous closing in the guest's current language, then call the end_call tool. Do not ask another follow-up question after the guest has closed the conversation.
 
 Details to collect by request type:
-- Wake-up call: room number, date, time, AM/PM or 24-hour confirmation, one-time or repeated wake-up call, guest name if offered, preferred language if relevant. Confirm clearly, then call submit_hotel_request with category wake_up_call.
-- Housekeeping: room number, item/service needed, preferred timing, urgency, access/privacy preference if relevant. For room cleaning, ask for the room number first if missing, then ask preferred timing or whether housekeeping may enter if needed. Once enough details are confirmed, call submit_hotel_request with category housekeeping.
+- Wake-up call: room number, date, time, AM/PM or 24-hour confirmation, one-time or repeated wake-up call, guest name if offered, preferred language if relevant. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category wake_up_call and confirmed_with_guest true.
+- Housekeeping: room number, item/service needed, preferred timing, urgency, access/privacy preference if relevant. For room cleaning, ask for the room number first if missing, then ask preferred timing or whether housekeeping may enter if needed. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category housekeeping and confirmed_with_guest true.
 - Maintenance: room number, issue, severity, safety risk, whether someone may enter the room, preferred timing. Transfer urgent or safety-related issues to 1920.
 - Transportation: pickup/drop-off location, date/time, number of passengers, luggage, vehicle preference, child seat/accessibility needs, contact/room number.
 - Dining recommendation or reservation: cuisine, date/time, number of guests, budget, dietary restrictions/allergies, occasion, location preference. Confirm reservation details if booking is requested.
@@ -61,7 +63,7 @@ Human agent transfer:
 Room service and in-room dining:
 - Treat "room service," "in-room dining," "order food to my room," "send food upstairs," "breakfast in the room," and "dining delivery" as service requests to collect and submit, not automatic transfers.
 - Collect room number, requested items or general request, preferred delivery time, number of guests if relevant, allergies/dietary/religious requirements, and any special notes. Ask one question at a time.
-- When the details are sufficient and confirmed, call submit_hotel_request with category room_service.
+- When the details are sufficient, repeat the room-service request back to the guest and ask for confirmation. Only after the guest confirms, call submit_hotel_request with category room_service and confirmed_with_guest true.
 - Transfer to 1921 only if the guest explicitly asks to speak to, call, connect to, or transfer to room service or in-room dining staff, or if the request is an order status/change/complaint that requires live staff. In that case, call the transfer_to_extension tool with extension 1921.
 
 Multilingual support:
@@ -75,8 +77,14 @@ Multilingual support:
 
 Confirmation rules:
 - Always confirm dates, times, room numbers, names, phone numbers, destination addresses, number of guests, prices, allergies, dietary needs, accessibility needs, transport instructions, emergency locations, and wake-up call details.
+- Never call submit_hotel_request with confirmed_with_guest false. If the request is not confirmed yet, ask the guest to confirm instead of calling the tool.
 - If a detail sounds ambiguous, ask a single clarifying question.
 - If you cannot complete an action, explain briefly and offer the next best step or transfer.
+
+Call ending:
+- If the guest declines further help or closes the conversation, say a short premium-hospitality goodbye such as "You're very welcome. Thank you for calling, and have a pleasant day."
+- Then call the end_call tool with action end_call and a short reason.
+- Only end the call when the guest clearly has no further request, or after a successful transfer/request flow when the guest confirms nothing else is needed.
 
 Style examples:
 - "Of course, I'd be happy to help. May I have your room number, please?"
@@ -142,9 +150,28 @@ SUBMIT_HOTEL_REQUEST_TOOL = {
             "access_permission": {"type": "string", "description": "Whether staff may enter the room, if relevant."},
             "language": {"type": "string", "description": "Guest's current preferred language code."},
             "notes": {"type": "string", "description": "Dietary needs, allergies, accessibility needs, contact details, or other important context."},
-            "confirmed_with_guest": {"type": "boolean", "description": "True only after repeating key details and receiving confirmation."},
+            "confirmed_with_guest": {
+                "type": "boolean",
+                "description": "Must be true. Only call this tool after repeating key details and receiving explicit guest confirmation.",
+            },
         },
         "required": ["category", "summary", "priority", "language", "confirmed_with_guest"],
+        "additionalProperties": False,
+    },
+}
+
+
+END_CALL_TOOL = {
+    "type": "function",
+    "name": "end_call",
+    "description": "End the live call after the guest clearly indicates there are no more requests.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["end_call"]},
+            "reason": {"type": "string", "description": "Short reason for ending the call."},
+        },
+        "required": ["action", "reason"],
         "additionalProperties": False,
     },
 }
@@ -158,6 +185,7 @@ class RealtimeTurnResult:
     language: str | None = None
     transfer_action: dict[str, Any] | None = None
     service_request_action: dict[str, Any] | None = None
+    end_call_action: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -234,6 +262,9 @@ class OpenAIRealtimeClient:
                         parsed_request = self._parse_service_request_args(raw_args)
                         if parsed_request:
                             result.service_request_action = parsed_request
+                        parsed_end_call = self._parse_end_call_args(raw_args)
+                        if parsed_end_call:
+                            result.end_call_action = parsed_end_call
                     break
 
         return result
@@ -272,6 +303,7 @@ class OpenAIRealtimeClient:
             f"{language_response_instruction(language_code)} "
             "This turn's detected language overrides prior conversation language. "
             "If the guest explicitly asks to use another language, switch to that requested language immediately. "
+            "Do not reintroduce yourself; the call greeting has already been played. "
             "Keep the response concise for a phone call."
         )
 
@@ -329,7 +361,7 @@ class OpenAIRealtimeClient:
                         "voice": "marin",
                     },
                 },
-                "tools": [TRANSFER_TOOL, SUBMIT_HOTEL_REQUEST_TOOL],
+                "tools": [TRANSFER_TOOL, SUBMIT_HOTEL_REQUEST_TOOL, END_CALL_TOOL],
                 "tool_choice": "auto",
             },
         }
@@ -355,7 +387,7 @@ class OpenAIRealtimeClient:
 
     def _extract_tool_call(self, event: dict[str, Any], result: RealtimeTurnResult) -> None:
         raw = json.dumps(event)
-        if "transfer_to_extension" not in raw and "submit_hotel_request" not in raw:
+        if "transfer_to_extension" not in raw and "submit_hotel_request" not in raw and "end_call" not in raw:
             return
         for key in ("arguments", "args"):
             if key in event:
@@ -365,6 +397,9 @@ class OpenAIRealtimeClient:
                 parsed_request = self._parse_service_request_args(event[key])
                 if parsed_request:
                     result.service_request_action = parsed_request
+                parsed_end_call = self._parse_end_call_args(event[key])
+                if parsed_end_call:
+                    result.end_call_action = parsed_end_call
         item = event.get("item") or event.get("response") or {}
         for output in item.get("output", []) if isinstance(item, dict) else []:
             name = output.get("name", "")
@@ -376,6 +411,10 @@ class OpenAIRealtimeClient:
                 parsed = self._parse_service_request_args(output.get("arguments", ""))
                 if parsed:
                     result.service_request_action = parsed
+            elif name == "end_call":
+                parsed = self._parse_end_call_args(output.get("arguments", ""))
+                if parsed:
+                    result.end_call_action = parsed
         if isinstance(item, dict) and item.get("name") == "submit_hotel_request":
             parsed = self._parse_service_request_args(item.get("arguments", ""))
             if parsed:
@@ -384,6 +423,10 @@ class OpenAIRealtimeClient:
             parsed = self._parse_transfer_args(item.get("arguments", ""))
             if parsed:
                 result.transfer_action = parsed
+        if isinstance(item, dict) and item.get("name") == "end_call":
+            parsed = self._parse_end_call_args(item.get("arguments", ""))
+            if parsed:
+                result.end_call_action = parsed
 
     def _parse_transfer_args(self, raw_args: Any) -> dict[str, Any] | None:
         if not raw_args:
@@ -414,5 +457,20 @@ class OpenAIRealtimeClient:
         if data.get("category") and data.get("summary"):
             data.setdefault("priority", "normal")
             data.setdefault("confirmed_with_guest", False)
+            return data
+        return None
+
+    def _parse_end_call_args(self, raw_args: Any) -> dict[str, Any] | None:
+        if not raw_args:
+            return None
+        if isinstance(raw_args, dict):
+            data = raw_args
+        else:
+            try:
+                data = json.loads(raw_args)
+            except (TypeError, json.JSONDecodeError):
+                return None
+        if data.get("action") == "end_call":
+            data.setdefault("reason", "guest indicated there are no more requests")
             return data
         return None

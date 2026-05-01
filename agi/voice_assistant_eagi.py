@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
@@ -19,7 +20,13 @@ from urllib import request
 from dotenv import load_dotenv
 
 from audio_utils import asterisk_playback_wav, capture_utterance_from_fd3, openai_input_pcm, write_wav
-from call_session import CallSession, detect_language_from_text, determine_transfer_action, should_transfer_deterministic
+from call_session import (
+    CallSession,
+    detect_language_from_text,
+    determine_transfer_action,
+    should_end_call_deterministic,
+    should_transfer_deterministic,
+)
 from openai_realtime_client import OpenAIRealtimeClient
 
 
@@ -71,6 +78,19 @@ UNAVAILABLE_PHRASES = {
     "th": "ขออภัย เจ้าหน้าที่ไม่พร้อมรับสายในตอนนี้",
     "vi": "Xin lỗi, đồng nghiệp của tôi hiện không thể nghe máy.",
     "id": "Maaf, rekan saya belum tersedia saat ini.",
+}
+
+CLOSING_PHRASES = {
+    "en": "You're very welcome. Thank you for calling, and have a pleasant day.",
+    "zh": "不客气。感谢您的来电，祝您今天愉快。",
+    "zh-yue": "唔使客氣。多謝你致電，祝你有愉快嘅一日。",
+    "ms": "Sama-sama. Terima kasih kerana menghubungi kami, semoga hari anda menyenangkan.",
+    "ta": "மிகவும் மகிழ்ச்சி. அழைத்ததற்கு நன்றி, இனிய நாள் அமையட்டும்.",
+    "ja": "どういたしまして。お電話ありがとうございました。どうぞ良い一日をお過ごしください。",
+    "ko": "천만에요. 전화해 주셔서 감사합니다. 좋은 하루 보내세요.",
+    "th": "ยินดีค่ะ ขอบคุณที่โทรมา ขอให้มีวันที่ดีนะคะ",
+    "vi": "Rất hân hạnh. Cảm ơn quý khách đã gọi, chúc quý khách một ngày tốt lành.",
+    "id": "Sama-sama. Terima kasih telah menghubungi kami, semoga hari Anda menyenangkan.",
 }
 
 
@@ -308,6 +328,31 @@ def handle_shutdown_signal(signum: int, _frame: object) -> None:
     raise SystemExit(0)
 
 
+def service_request_is_confirmed(action: dict | None) -> bool:
+    if not action:
+        return False
+    return action.get("confirmed_with_guest") is True
+
+
+def service_request_confirmation_text(action: dict, language: str) -> str:
+    summary = action.get("summary", "this request")
+    room = action.get("room_number")
+    if language == "zh":
+        room_text = f"，房号 {room}" if room else ""
+        return f"请确认：您是否要我提交这个请求：{summary}{room_text}？"
+    if language == "zh-yue":
+        room_text = f"，房號 {room}" if room else ""
+        return f"請確認：你係咪想我提交呢個要求：{summary}{room_text}？"
+    if language == "ms":
+        room_text = f" untuk bilik {room}" if room else ""
+        return f"Sila sahkan: adakah anda mahu saya hantar permintaan ini, {summary}{room_text}?"
+    if language == "id":
+        room_text = f" untuk kamar {room}" if room else ""
+        return f"Mohon konfirmasi: apakah Anda ingin saya mengirim permintaan ini, {summary}{room_text}?"
+    room_text = f" for room {room}" if room else ""
+    return f"Please confirm: would you like me to submit this request, {summary}{room_text}?"
+
+
 async def synthesize_text_phrase(
     client: OpenAIRealtimeClient,
     session: CallSession,
@@ -332,12 +377,34 @@ async def synthesize_text_phrase(
                     "item": {
                         "type": "message",
                         "role": "user",
-                        "content": [{"type": "input_text", "text": f"Say exactly this sentence: {text}"}],
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Read this approved hotel phone phrase verbatim as natural speech. "
+                                    "Do not add, remove, translate, apologize, refuse, or explain. "
+                                    f"Phrase: {text}"
+                                ),
+                            }
+                        ],
                     },
                 }
             )
         )
-        await ws.send(json.dumps({"type": "response.create", "response": {"output_modalities": ["audio"]}}))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": (
+                            "You are only performing text-to-speech for an approved hotel phone system phrase. "
+                            "Speak the phrase exactly and naturally. Do not refuse or mention policy."
+                        ),
+                    },
+                }
+            )
+        )
         while True:
             event = json.loads(await ws.recv())
             if event.get("type") in {"response.audio.delta", "response.output_audio.delta"}:
@@ -348,6 +415,30 @@ async def synthesize_text_phrase(
                 raise RuntimeError(f"OpenAI phrase synthesis failed: {event.get('error', event)}")
 
     return asterisk_playback_wav(target_wav, pcm24k)
+
+
+async def synthesize_cached_greeting(
+    client: OpenAIRealtimeClient,
+    session: CallSession,
+    text: str,
+    sounds_dir: Path,
+) -> Path:
+    """Generate the greeting once and reuse it so callers hear the same greeting every call."""
+    cache_enabled = os.getenv("AI_GREETING_CACHE", "true").lower() == "true"
+    cache_version = os.getenv("AI_GREETING_CACHE_VERSION", "2")
+    cache_key_source = f"{cache_version}|{client.model}|{session.preferred_language}|{text}"
+    cache_key = hashlib.sha256(cache_key_source.encode("utf-8")).hexdigest()[:16]
+    cached_wav = sounds_dir / f"greeting_{cache_key}.wav"
+
+    if cache_enabled and cached_wav.exists() and cached_wav.stat().st_size > 44:
+        session.append_event("greeting_cache_hit", {"file": str(cached_wav), "text": text})
+        return cached_wav
+
+    target_wav = cached_wav if cache_enabled else sounds_dir / f"{session.call_id}_greeting.wav"
+    generated_wav = await synthesize_text_phrase(client, session, text, target_wav)
+    if cache_enabled:
+        session.append_event("greeting_cache_created", {"file": str(generated_wav), "text": text})
+    return generated_wav
 
 
 async def synthesize_transfer_phrase(client: OpenAIRealtimeClient, session: CallSession, text: str, sounds_dir: Path, turn: int) -> Path:
@@ -394,8 +485,8 @@ async def run_call() -> int:
 
     if enable_ai_greeting:
         try:
-            agi_verbose("AI assistant generating greeting", 1)
-            greeting_wav = await synthesize_text_phrase(client, session, greeting_text, sounds_dir / f"{session.call_id}_greeting.wav")
+            agi_verbose("AI assistant preparing greeting", 1)
+            greeting_wav = await synthesize_cached_greeting(client, session, greeting_text, sounds_dir)
             greeting_response = agi_stream_file(str(greeting_wav.with_suffix("")))
             session.append_event("greeting_played", {"file": str(greeting_wav), "text": greeting_text, "agi_response": greeting_response})
         except Exception as exc:
@@ -468,6 +559,13 @@ async def run_call() -> int:
             if deterministic_action and result.transfer_action is None:
                 result.transfer_action = deterministic_action
 
+            should_end_call, end_call_reason = should_end_call_deterministic(result.transcript)
+            if should_end_call and result.end_call_action is None:
+                result.end_call_action = {
+                    "action": "end_call",
+                    "reason": end_call_reason or "guest indicated there are no more requests",
+                }
+
             transfer, reason = should_transfer_deterministic(result.transcript, session.failed_intent_count)
             target_extension = transfer_extension
             transfer_type = "human"
@@ -494,6 +592,8 @@ async def run_call() -> int:
                 )
             if result.service_request_action:
                 session.append_event("service_request_action_detected", result.service_request_action)
+            if result.end_call_action:
+                session.append_event("end_call_action_detected", result.end_call_action)
 
             if result.response_audio_pcm24k:
                 response_wav = asterisk_playback_wav(sounds_dir / f"{session.call_id}_{turn}.wav", result.response_audio_pcm24k)
@@ -505,10 +605,35 @@ async def run_call() -> int:
                 time.sleep(0.25)
             else:
                 session.append_event("assistant_audio_missing", {"turn": turn, "text": result.response_text})
-                if not transfer and not result.service_request_action:
+                if not transfer and not result.service_request_action and not result.end_call_action:
                     continue
 
             if result.service_request_action:
+                if not service_request_is_confirmed(result.service_request_action):
+                    session.append_event(
+                        "service_request_confirmation_required",
+                        {
+                            "reason": "model attempted to submit before explicit guest confirmation",
+                            "request": result.service_request_action,
+                        },
+                    )
+                    if not result.response_audio_pcm24k:
+                        confirmation_question = service_request_confirmation_text(
+                            result.service_request_action,
+                            session.preferred_language,
+                        )
+                        confirmation_wav = await synthesize_text_phrase(
+                            client,
+                            session,
+                            confirmation_question,
+                            sounds_dir / f"{session.call_id}_{turn}_request_confirm_question.wav",
+                        )
+                        response = agi_stream_file(str(confirmation_wav.with_suffix("")))
+                        session.append_event(
+                            "service_request_confirmation_prompt_played",
+                            {"turn": turn, "file": str(confirmation_wav), "text": confirmation_question, "agi_response": response},
+                        )
+                    continue
                 try:
                     submission = post_hotel_request(session, result.service_request_action)
                     session.append_event("service_request_submitted", submission)
@@ -527,7 +652,36 @@ async def run_call() -> int:
                 except Exception as exc:
                     LOGGER.exception("Could not submit hotel request")
                     session.append_event("service_request_error", {"error": str(exc), "payload": result.service_request_action})
+                if result.end_call_action:
+                    session.append_event(
+                        "call_closing",
+                        {"reason": result.end_call_action.get("reason", "guest indicated there are no more requests")},
+                    )
+                    break
                 continue
+
+            if result.end_call_action:
+                if not result.response_audio_pcm24k:
+                    closing = CLOSING_PHRASES.get(session.preferred_language, CLOSING_PHRASES["en"])
+                    closing_wav = await synthesize_text_phrase(
+                        client,
+                        session,
+                        closing,
+                        sounds_dir / f"{session.call_id}_{turn}_closing.wav",
+                    )
+                    closing_response = agi_stream_file(str(closing_wav.with_suffix("")))
+                    session.append_event(
+                        "closing_phrase_played",
+                        {"turn": turn, "file": str(closing_wav), "text": closing, "agi_response": closing_response},
+                    )
+                    if agi_response_is_dead_channel(closing_response):
+                        session.append_event("hangup", {"reason": "dead channel during closing phrase playback"})
+                        break
+                session.append_event(
+                    "call_closing",
+                    {"reason": result.end_call_action.get("reason", "guest indicated there are no more requests")},
+                )
+                break
 
             if transfer:
                 session.request_transfer(reason or "transfer requested")
