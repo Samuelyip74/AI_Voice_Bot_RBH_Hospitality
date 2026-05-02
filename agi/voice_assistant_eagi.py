@@ -15,6 +15,7 @@ import json
 import smtplib
 from pathlib import Path
 from email.message import EmailMessage
+from email.utils import formataddr
 from urllib import request
 
 from dotenv import load_dotenv
@@ -282,9 +283,11 @@ def send_call_transcript_email(session: CallSession) -> dict:
     smtp_password = os.getenv("SMTP_PASSWORD", "")
     smtp_starttls = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
     sender = os.getenv("TRANSCRIPT_EMAIL_FROM", smtp_user or "aivoicebot@localhost").strip()
+    sender_name = os.getenv("EMAIL_FROM_NAME", "Hotel Voicebot").strip()
+    sender_header = formataddr((sender_name, sender)) if sender_name else sender
 
     msg = EmailMessage()
-    msg["From"] = sender
+    msg["From"] = sender_header
     msg["To"] = recipient
     msg["Subject"] = f"AI Voice Bot Call Transcript - {session.call_id}"
     msg.set_content(transcript_text(session))
@@ -305,7 +308,90 @@ def send_call_transcript_email(session: CallSession) -> dict:
             smtp.login(smtp_user, smtp_password)
         smtp.send_message(msg)
 
-    return {"sent": True, "to": recipient, "from": sender, "host": smtp_host, "port": smtp_port}
+    return {"sent": True, "to": recipient, "from": sender_header, "host": smtp_host, "port": smtp_port}
+
+
+def smtp_config(prefix: str = "") -> dict:
+    recipient = os.getenv(f"{prefix}EMAIL_TO", "").strip() or os.getenv("TRANSCRIPT_EMAIL_TO", "").strip()
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USERNAME", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "")
+    smtp_starttls = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
+    sender = os.getenv("TRANSCRIPT_EMAIL_FROM", smtp_user or "aivoicebot@localhost").strip()
+    sender_name = os.getenv("EMAIL_FROM_NAME", "Hotel Voicebot").strip()
+    sender_header = formataddr((sender_name, sender)) if sender_name else sender
+    return {
+        "recipient": recipient,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_user": smtp_user,
+        "smtp_password": smtp_password,
+        "smtp_starttls": smtp_starttls,
+        "sender": sender,
+        "sender_header": sender_header,
+    }
+
+
+def send_service_request_email(session: CallSession, request_payload: dict, submission: dict) -> dict:
+    enabled = os.getenv("SERVICE_REQUEST_EMAIL_ENABLED", "true").lower() == "true"
+    if not enabled:
+        return {"sent": False, "reason": "SERVICE_REQUEST_EMAIL_ENABLED is false"}
+
+    config = smtp_config("SERVICE_REQUEST_")
+    if not config["recipient"]:
+        return {"sent": False, "reason": "TRANSCRIPT_EMAIL_TO is not configured"}
+    if not config["smtp_host"]:
+        return {"sent": False, "reason": "SMTP_HOST is not configured"}
+
+    request_details = json.dumps(request_payload, ensure_ascii=False, indent=2)
+    submission_details = json.dumps(
+        {key: value for key, value in submission.items() if key != "payload"},
+        ensure_ascii=False,
+        indent=2,
+    )
+    body = "\n".join(
+        [
+            "A confirmed hotel service request was submitted.",
+            "",
+            f"Call ID: {session.call_id}",
+            f"Caller ID: {session.caller_id}",
+            f"Preferred language: {session.preferred_language}",
+            "",
+            "Request:",
+            request_details,
+            "",
+            "Webhook result:",
+            submission_details,
+            "",
+            "Recent transcript:",
+            transcript_text(session),
+        ]
+    )
+
+    msg = EmailMessage()
+    msg["From"] = config["sender_header"]
+    msg["To"] = config["recipient"]
+    category = request_payload.get("category", "service_request")
+    room = request_payload.get("room_number", "")
+    room_suffix = f" room {room}" if room else ""
+    msg["Subject"] = f"Hotel Service Request - {category}{room_suffix} - {session.call_id}"
+    msg.set_content(body)
+
+    with smtplib.SMTP(config["smtp_host"], config["smtp_port"], timeout=float(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))) as smtp:
+        if config["smtp_starttls"]:
+            smtp.starttls()
+        if config["smtp_user"] or config["smtp_password"]:
+            smtp.login(config["smtp_user"], config["smtp_password"])
+        smtp.send_message(msg)
+
+    return {
+        "sent": True,
+        "to": config["recipient"],
+        "from": config["sender_header"],
+        "host": config["smtp_host"],
+        "port": config["smtp_port"],
+    }
 
 
 def finalize_transcript_email(session: CallSession) -> None:
@@ -637,6 +723,12 @@ async def run_call() -> int:
                 try:
                     submission = post_hotel_request(session, result.service_request_action)
                     session.append_event("service_request_submitted", submission)
+                    try:
+                        service_email_result = send_service_request_email(session, result.service_request_action, submission)
+                        session.append_event("service_request_email_result", service_email_result)
+                    except Exception as exc:
+                        LOGGER.exception("Could not send service request email")
+                        session.append_event("service_request_email_error", {"error": str(exc)})
                     if not result.response_audio_pcm24k:
                         if submission.get("sent"):
                             confirmation = "Thank you. I have submitted your request to our hotel team."
