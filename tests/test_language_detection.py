@@ -144,6 +144,18 @@ def test_clear_arabic_sentence_reaches_switch_threshold():
     assert confidence >= 0.9
 
 
+def test_short_japanese_noise_does_not_reach_switch_threshold():
+    language, confidence = detect_language_from_text("なぜだ。", "en")
+    assert language == "ja"
+    assert confidence < 0.9
+
+
+def test_clear_japanese_sentence_reaches_switch_threshold():
+    language, confidence = detect_language_from_text("こんにちは、ルームサービスをお願いします", "en")
+    assert language == "ja"
+    assert confidence >= 0.9
+
+
 def test_session_updates_preferred_language():
     session = CallSession(call_id="test")
     session.log_dir = Path("logs/test-calls")
