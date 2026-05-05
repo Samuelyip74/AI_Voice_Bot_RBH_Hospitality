@@ -80,9 +80,13 @@ services:
       - "1812:1812/udp"
       - "1813:1813/udp"
     volumes:
-      - ./freeradius:/etc/freeradius
+      - ./freeradius:/config-src:ro
     depends_on:
       - api
+    command: >
+      sh -c "cp -a /config-src/. /etc/freeradius/ &&
+             chmod -R go-w /etc/freeradius &&
+             exec freeradius -f"
     restart: unless-stopped
 
 volumes:
