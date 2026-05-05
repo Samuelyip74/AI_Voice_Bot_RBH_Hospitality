@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Hotel Guest Application</title>
+
+  <!-- Bootstrap 5 -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+
+  <!-- Font Awesome -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+  />
+<style>
+
+.hero-section {
+  min-height: 320px;
+  margin-top: -20px !important;
+  margin-left: -20px !important;
+  margin-right: -20px !important;
+  background: linear-gradient(
+      rgba(0, 0, 0, 0.45),
+      rgba(0, 0, 0, 0.45)
+    ),
+    url("/static/hotel_hero.jpg") center / cover no-repeat;
+}
+
+.menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 1050;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.menu-image {
+  max-width: 95%;
+  max-height: 95%;
+  object-fit: contain;
+}
+
+.menu-close {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  font-size: 40px;
+  color: white;
+  cursor: pointer;
+  user-select: none;
+}
+
+
+
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  z-index: 9999;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.call-overlay.hidden {
+  display: none;
+}
+
+.call-overlay-content {
+  text-align: center;
+  color: white;
+}
+
+.operator-icon {
+  font-size: 96px;
+  margin-bottom: 32px;
+}
+
+.call-actions {
+  display: flex;
+  gap: 24px;
+  justify-content: center;
+}
+
+.call-btn {
+  min-width: 120px;
+  padding: 14px 20px;
+  font-size: 16px;
+  border-radius: 30px;
+  border: none;
+  cursor: pointer;
+}
+
+.call-btn.mute {
+  background: #555;
+  color: white;
+}
+
+.call-btn.end {
+  background: #e53935;
+  color: white;
+}
+
+.operator-icon {
+  margin-bottom: 32px;
+}
+
+.operator-icon img {
+  width: 300px;
+  height: 300px;        /* optional but recommended for circle */
+  object-fit: cover;
+}
+
+.pressable-card {
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  cursor: pointer;
+}
+
+.pressable-card.is-pressed {
+  transform: translateY(2px) scale(0.99);
+  box-shadow: 0 .4rem 1rem rgba(0, 0, 0, 0.2);
+}
+
+.status-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translate(-50%, 120%);
+  min-width: 240px;
+  max-width: 90vw;
+  padding: 12px 16px;
+  border-radius: 12px;
+  color: #fff;
+  background: #0d6efd;
+  box-shadow: 0 1.25rem 2.5rem rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: transform 200ms ease, opacity 200ms ease;
+  z-index: 1100;
+  text-align: center;
+  font-weight: 600;
+  letter-spacing: 0.15px;
+}
+
+.status-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.status-toast.success {
+  background: #198754;
+}
+
+.status-toast.error {
+  background: #dc3545;
+}
+
+
+
+</style>
+</head>
+
+<body class="bg-light">
+  <div id="app"></div>
+
+  <!-- Bootstrap JS (lightweight) -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <script type="module" src="./bundle.js"></script>
+</body>
+<audio id="globalAudioTag" autoplay style="display:none;"></audio>
+<footer></footer>
+
+</html>

@@ -1,98 +1,189 @@
-# Asterisk SIP AI Voice Assistant Prototype
+# AI Voice Bot + Rainbow Hospitality Guest App
 
-This repository is a local lab prototype for an Asterisk SIP voice assistant using Python EAGI and the OpenAI Realtime API over server-side WebSocket.
+This repository combines two Dockerized hospitality prototypes:
+
+- An Asterisk SIP AI voice assistant using Python EAGI and the OpenAI Realtime API.
+- A Rainbow Hospitality guest web app with a FastAPI backend, web frontend, Apache reverse proxy, and FreeRADIUS captive portal support.
+
+The FastAPI backend uses `rbh-builder-python` for Rainbow Hospitality Gateway REST calls such as login, room lookup, and wake-up call creation.
 
 ```mermaid
 flowchart LR
-    Phone1000[SIP softphone 1000] -->|PJSIP UDP 5060/RTP| Asterisk[Asterisk]
-    Phone1001[SIP softphone 1001] -->|PJSIP UDP 5060/RTP| Asterisk
+    Phone[SIP / Rainbow caller] --> Asterisk[Asterisk]
     Asterisk -->|EAGI fd 3 caller audio| EAGI[voice_assistant_eagi.py]
     EAGI -->|PCM16 24 kHz WebSocket| OpenAI[OpenAI Realtime API]
-    OpenAI -->|transcript + text + PCM audio + tool calls| EAGI
-    EAGI -->|WAV in sounds/ai + STREAM FILE| Asterisk
-    EAGI -->|EXEC Dial PJSIP/1001,30| Asterisk
+    OpenAI -->|transcript + audio + tool calls| EAGI
+    EAGI -->|WAV playback / transfer| Asterisk
+
+    Browser[Guest browser] --> Apache[Apache HTTPS]
+    Apache --> Frontend[Frontend SPA]
+    Apache -->|/api /portal /radius /static| FastAPI[FastAPI backend]
+    FastAPI -->|rbh-builder-python| RHG[Rainbow Hospitality Gateway]
+    FastAPI --> RoomService[Room service webhook]
+    FreeRADIUS[FreeRADIUS] -->|REST auth| FastAPI
 ```
 
-## What Is Included
+## Project Structure
 
-- PJSIP extensions `1000` and `1001`
-- Dial `5000` to reach the AI assistant
-- Python EAGI script that reads caller audio from file descriptor 3
-- Half-duplex turn loop: capture, send to Realtime, play generated audio, repeat
-- Per-call in-memory context and JSONL transcript logs
-- Deterministic and model-driven transfer to extension `1001`
-- Unit tests for language hints, transfer decisions, and audio conversion
+- `agi/`: Python EAGI assistant, OpenAI Realtime client, audio utilities, call session logic.
+- `asterisk/`: Asterisk PJSIP, dialplan, RTP, and module configuration.
+- `api/`: FastAPI backend for guest authentication, Rainbow config, room service proxy, wake-up calls, and captive portal auth.
+- `frontend/`: Guest-facing web app built with Rollup and `rainbow-web-sdk`.
+- `apache/`: Apache HTTPS reverse proxy and SPA hosting config.
+- `freeradius/`: FreeRADIUS configuration for captive portal authentication.
+- `tests/`: Python unit tests for voice bot logic.
+- `logs/`: Runtime call logs and generated artifacts.
+
+## Docker Services
+
+`docker-compose.yml` defines:
+
+- `asterisk`: SIP/RTP server and Python EAGI runtime.
+- `api`: FastAPI backend for the guest web app.
+- `apache`: HTTPS reverse proxy and frontend host.
+- `frontend-build`: one-shot frontend build service.
+- `freeradius`: RADIUS service for captive portal flows.
+- `certbot`: certificate helper container.
 
 ## Prerequisites
 
-- Docker and Docker Compose
-- Python 3.11+ for local tests
-- A SIP softphone such as MicroSIP, Linphone, or Zoiper
-- An OpenAI API key with Realtime API access
+- Docker and Docker Compose.
+- Python 3.11+ for local tests.
+- A SIP softphone such as MicroSIP, Linphone, or Zoiper.
+- OpenAI API key with Realtime API access.
+- Rainbow app credentials.
+- Rainbow Hospitality Gateway credentials.
 
-## Configure OpenAI
+## Configure Asterisk Voice Bot
 
-Create `agi/.env` from the example:
-
-```bash
-cp agi/.env.example agi/.env
-```
-
-Set:
+Create `agi/.env` from `agi/.env.example` and set at least:
 
 ```env
 OPENAI_API_KEY=your_api_key_here
 OPENAI_REALTIME_MODEL=gpt-realtime
-ASTERISK_EXTERNAL_IP=175.156.147.114
-ASTERISK_LAN_IP=192.168.0.58
-ASTERISK_LOCAL_NET=192.168.0.0/24
+ASTERISK_EXTERNAL_IP=<public_or_nat_ip>
+ASTERISK_LAN_IP=<docker_host_lan_ip>
+ASTERISK_LOCAL_NET=<lan_cidr>
+```
+
+Common voice bot settings:
+
+```env
+ASTERISK_SOUNDS_DIR=/var/lib/asterisk/sounds/ai
+DEFAULT_LANGUAGE=en
+SILENCE_TIMEOUT_MS=900
+MAX_UTTERANCE_SECONDS=15
+HUMAN_TRANSFER_EXTENSION=1920
+ROOM_SERVICE_TRANSFER_EXTENSION=1921
+TRANSFER_TARGET_TEMPLATE=sip:{extension}@313.apac1.sip.openrainbow.com
+RECORD_AUDIO=false
+LOG_LEVEL=INFO
 ```
 
 Do not commit `agi/.env`.
 
-`ASTERISK_EXTERNAL_IP` is the public firewall/NAT address advertised to SIP trunks. `ASTERISK_LAN_IP` is the Windows/Docker host LAN address used by local softphones. `ASTERISK_LOCAL_NET` should match the LAN subnet.
+## Configure Guest Web App
 
-## Start Asterisk
+Create `api/app/.env` from `api/app/env.sample` and set:
+
+```env
+RAINBOW_SERVER=<rainbow_server>
+RAINBOW_APP_ID=<application_id>
+RAINBOW_APP_SECRET=<application_secret>
+
+PMS_BASE_URL=https://red-rhg.openrainbow.io/provisioningapi
+PMS_API_BASE_URL=https://red-rhg.openrainbow.io/provisioningapi/api
+PMS_USERNAME=<rainbow_hospitality_username>
+PMS_PASSWORD=<rainbow_hospitality_password>
+PMS_TIMEOUT=10
+
+ROOM_SERVICE_URL=<room_service_webhook_url>
+ROOM_SERVICE_VERIFY=true
+
+GUESTSERVICE_EXT=1111
+FRONTDESK_EXT=0
+OPERATOR_EXT=1111
+CONCIERGE_EXT=0
+EMERGENCY_CONTACT=1111
+```
+
+The backend validates guests by room number and last name using Rainbow Hospitality room data. Wake-up calls are created through `RainbowClient.create_wakeup_call(...)` from `rbh-builder-python`.
+
+Do not commit `api/app/.env`.
+
+## Start The Stack
+
+Build the guest frontend:
+
+```bash
+docker compose --profile build run --rm frontend-build
+```
+
+Start everything:
 
 ```bash
 docker compose up -d --build
-docker logs -f aivoicebot-asterisk
 ```
 
-The Compose project builds a small local image on top of Asterisk so the Python EAGI dependencies from `agi/requirements.txt` are available inside the container.
+Useful logs:
 
-The container mounts:
+```bash
+docker logs -f aivoicebot-asterisk
+docker compose logs -f api
+docker compose logs -f apache
+```
 
-- `asterisk/*.conf` into `/etc/asterisk`
-- `agi/` into `/var/lib/asterisk/agi-bin`
-- generated AI audio into `/var/lib/asterisk/sounds/ai`
-- call logs into `./logs`
+The API is exposed on `http://localhost:8000`. Apache exposes ports `80` and `443`.
 
-## Register SIP Softphones
+## SIP Extensions
 
-Use `ASTERISK_LAN_IP` from `agi/.env` as the SIP server for local softphones. For the public SIP/TLS trunk, Asterisk advertises `ASTERISK_EXTERNAL_IP` in SIP/RTP. The generated runtime config is created from `asterisk/pjsip.conf.template` when the container starts.
+Local test extensions:
 
-Extension `1000`:
+- `1000`: password `1000pass`
+- `1001`: password `1001pass`
+- `5000`: AI assistant via `EAGI(voice_assistant_eagi.py)`
+- `6000`: Asterisk echo test
 
-- Username: `1000`
-- Password: `1000pass`
-- Domain/server: value of `ASTERISK_LAN_IP`, for example `192.168.0.58`
-- Transport: UDP
+Use `ASTERISK_LAN_IP` as the SIP server for local softphones.
 
-Extension `1001`:
+Rainbow SIP/TLS trunk calls to `1900` are routed to the AI assistant. The assistant transfers callers with:
 
-- Username: `1001`
-- Password: `1001pass`
-- Domain/server: value of `ASTERISK_LAN_IP`, for example `192.168.0.58`
-- Transport: UDP
+```text
+Transfer(sip:{extension}@313.apac1.sip.openrainbow.com)
+```
 
-The concierge team number `1920` and in-room dining number `1921` are external Rainbow destinations. They do not register to this Asterisk server. The EAGI script transfers callers with Asterisk `Transfer(sip:{extension}@313.apac1.sip.openrainbow.com)`, which requests a SIP REFER/remote transfer on the inbound Rainbow call.
+Default transfer destinations:
+
+- `1920`: concierge / front desk / human support
+- `1921`: room service / in-room dining
+
+## Guest Web App Behavior
+
+The frontend supports:
+
+- Guest login by room number and last name.
+- Rainbow Web SDK initialization for browser calling.
+- Home, Dining, Room Service, and Others tabs.
+- Call shortcuts for operator, front desk, concierge, and emergency contacts.
+- Room service request proxying through `/api/flows/new-request`.
+- Wake-up call scheduling through `/api/wakeup-call`.
+- Captive portal page at `/portal/login`.
+- RADIUS auth endpoint at `/radius/auth`.
+
+Backend endpoints:
+
+- `POST /api/guest/auth`
+- `GET /api/rainbow/config`
+- `POST /api/flows/new-request`
+- `POST /api/wakeup-call`
+- `GET /portal/login`
+- `POST /radius/auth`
 
 ## Call Tests
 
-Direct extension test:
+Direct SIP test:
 
-1. Register `1000` and `1001`.
+1. Register softphones `1000` and `1001`.
 2. From `1000`, call `1001`.
 3. Answer on `1001`.
 
@@ -102,117 +193,91 @@ AI assistant test:
 2. Speak after the assistant answers.
 3. The EAGI loop captures one utterance, sends it to OpenAI Realtime, writes a WAV response, and plays it back.
 
-Multilingual switching:
-
-1. Start in English: `Hello, can you help me remember my name is Sam?`
-2. Switch language: `你好，请用中文回答。`
-3. Switch again to another supported language, such as Malay, Japanese, Korean, Thai, Vietnamese, Indonesian, Tamil, Mandarin, or Cantonese.
-4. Check `logs/calls/{call_id}.jsonl` for language changes and transcript events.
-
 Transfer test:
 
-1. Call `5000` from `1000`.
+1. Call `5000`.
 2. Say `transfer me to a human`, `front desk`, or `operator`.
-3. The script plays a concierge transfer phrase and runs `EXEC Transfer sip:1920@313.apac1.sip.openrainbow.com`.
-4. Say `room service` or `I want in-room dining`.
-5. The script plays an in-room dining transfer phrase and runs `EXEC Transfer sip:1921@313.apac1.sip.openrainbow.com`.
-6. If Rainbow accepts the REFER/transfer, the caller is moved to the external target.
+3. The assistant transfers to `1920`.
+4. Say `connect me to room service`.
+5. The assistant transfers to `1921`.
 
-## Local Python Tests
+## Local Tests
 
 ```bash
 python -m venv .venv
-. .venv/Scripts/activate  # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r agi/requirements.txt
-pytest
+python -m pytest -q
 ```
-
-## Important Configuration
-
-`agi/.env.example`:
-
-```env
-OPENAI_API_KEY=
-OPENAI_REALTIME_MODEL=gpt-realtime
-ASTERISK_EXTERNAL_IP=<external_ip_address>
-ASTERISK_LAN_IP=<internal_ip_address>
-ASTERISK_LOCAL_NET=<internal_lan_network>
-ASTERISK_SOUNDS_DIR=/var/lib/asterisk/sounds/ai
-RECORD_AUDIO=false
-DEFAULT_LANGUAGE=en
-SILENCE_TIMEOUT_MS=900
-MAX_UTTERANCE_SECONDS=15
-TRANSFER_EXTENSION=<transfer_extension>
-HUMAN_TRANSFER_EXTENSION=<human_agent>
-ROOM_SERVICE_TRANSFER_EXTENSION=<room_service_extension>
-TRANSFER_TARGET_TEMPLATE=sip:{extension}@<external_sip_domain>
-LOG_LEVEL=INFO
-```
-
-Audio is not persisted by default. Set `RECORD_AUDIO=true` only in controlled testing environments.
 
 ## Troubleshooting
 
-No SIP registration:
+Open the Asterisk console:
 
-- Confirm Docker exposes UDP `5060`.
-- Check softphone username and password.
-- Verify the softphone is using UDP and the Docker host IP.
-- Run `docker exec -it aivoicebot-asterisk asterisk -rx "pjsip show contacts"`.
-
-No audio:
-
-- Confirm UDP `20000-20099` is open between softphones and the Docker host.
-- For the Rainbow SIP/TLS trunk, forward TCP `5061` and UDP `20000-20099` from `ASTERISK_EXTERNAL_IP` to `ASTERISK_LAN_IP`.
-- Disable SIP ALG on routers when testing across networks.
-- Try `direct_media=no` is already configured in `pjsip.conf`.
-
-EAGI fd 3 has no audio:
-
-- Confirm extension `5000` uses `EAGI(voice_assistant_eagi.py)`, not `AGI(...)`.
-- Make sure the call is answered before EAGI runs.
-- Confirm the caller is sending RTP and codec negotiation selects `ulaw`, `alaw`, or `slin16`.
-
-OpenAI websocket connection failed:
-
-- Check `OPENAI_API_KEY` in `agi/.env`.
-- Confirm the container has outbound network access.
-- Check the model in `OPENAI_REALTIME_MODEL`.
-- Inspect `docker logs aivoicebot-asterisk`.
-
-Asterisk cannot play generated audio:
-
-- Confirm files are written under `/var/lib/asterisk/sounds/ai`.
-- `STREAM FILE` must use the path without `.wav`.
-- The generated WAV is mono PCM16 at 8 kHz by default.
-- Check Asterisk logs for format module errors.
-
-## Security Notes
-
-- Change default SIP passwords before using outside a lab.
-- Restrict SIP and RTP ports with a firewall.
-- Never expose AGI scripts publicly.
-- Protect `OPENAI_API_KEY`.
-- Consider TLS/SRTP and stronger endpoint authentication for production.
-
-## Prototype Limits
-
-This is intentionally half-duplex and turn-based. It is suitable for validating SIP registration, EAGI audio access, Realtime API integration, multilingual context, and transfer behavior. For production, add barge-in, better RTP/media handling, structured observability, secrets management, and stricter call-flow recovery.
-
-
-## Troubleshooting
+```bash
 docker compose exec asterisk asterisk -rvvvvv
+```
 
-To turn on
+Enable detailed SIP/RTP logging:
 
+```text
 pjsip set logger on
 core set verbose 5
 core set debug 5
 rtp set debug on
+```
 
-To turn off
+Disable detailed logging:
 
+```text
 pjsip set logger off
 rtp set debug off
 core set debug 0
-rtp set debug off
+```
+
+No SIP registration:
+
+- Confirm UDP `5060` is exposed.
+- Check softphone username, password, transport, and server IP.
+- Run `pjsip show contacts` in the Asterisk console.
+
+No audio:
+
+- Confirm UDP `20000-20099` is reachable.
+- Verify NAT values in `agi/.env`.
+- Confirm codec negotiation selects `ulaw`, `alaw`, or `slin16`.
+- Use extension `6000` for an echo test.
+
+EAGI fd 3 has no audio:
+
+- Confirm extension `5000` uses `EAGI(...)`, not `AGI(...)`.
+- Confirm the call is answered before EAGI starts.
+- Check RTP debug output.
+
+OpenAI Realtime errors:
+
+- Check `OPENAI_API_KEY`.
+- Check `OPENAI_REALTIME_MODEL`.
+- Confirm the container has outbound network access.
+
+Guest web app auth errors:
+
+- Check `api/app/.env`.
+- Confirm `PMS_API_BASE_URL` points to the `/api` base path.
+- Confirm Rainbow Hospitality credentials can call `/Login` and `/GetRooms`.
+- Check `docker compose logs -f api`.
+
+## Security Notes
+
+- Change default SIP passwords before using outside a lab.
+- Restrict SIP, RTP, HTTP, HTTPS, and RADIUS ports with a firewall.
+- Never expose AGI scripts publicly.
+- Protect `OPENAI_API_KEY`, Rainbow credentials, SMTP credentials, and webhook tokens.
+- Keep `agi/.env` and `api/app/.env` out of Git.
+- Review frontend dependency audit results before production deployment.
+
+## Prototype Limits
+
+The voice assistant is intentionally half-duplex and turn-based. It is suitable for validating SIP registration, EAGI audio capture, OpenAI Realtime integration, multilingual handling, service request submission, and transfer behavior.
+
+For production, add barge-in, stronger media handling, structured observability, secret management, stricter call recovery, dependency hardening, and production-grade certificate management.

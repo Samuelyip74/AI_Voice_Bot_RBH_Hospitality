@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login</title>
+
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+        /* Background image */
+        background-image: url("/static/bg.jpg");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .login-container {
+        margin: 1em;
+        background: #ffffff;
+        width: 90%;
+        max-width: 360px;
+        padding: 32px 24px;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        text-align: center;
+    }
+
+    h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 600;
+        color: #000;
+    }
+
+    p {
+        margin-top: 8px;
+        margin-bottom: 24px;
+        font-size: 16px;
+        color: #6c6c70;
+    }
+
+    .error {
+        color: #ff3b30;
+        font-size: 14px;
+        margin-bottom: 16px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+        width: 100%;
+        padding: 14px 12px;
+        margin-bottom: 16px;
+        font-size: 16px;
+        border-radius: 10px;
+        border: 1px solid #d1d1d6;
+        background: #f9f9fb;
+        outline: none;
+        box-sizing: border-box;
+    }
+
+    input::placeholder {
+        color: #8e8e93;
+    }
+
+    input:focus {
+        border-color: #007aff;
+        background: #fff;
+    }
+
+    button {
+        width: 100%;
+        padding: 14px;
+        font-size: 17px;
+        font-weight: 600;
+        color: #ffffff;
+        background: #8e8e93;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background: #6c6c70;
+    }
+</style>
+</head>
+
+<body>
+
+<div class="login-container">
+    <h1>Guest WiFi Access</h1>
+    <p>Please log in to continue.</p>
+
+    {% if error_msg %}
+    <div class="error">{{ error_msg }}</div>
+    {% endif %}
+
+    <form action="{{ ap_login_url }}" method="post">
+        <!-- Hidden captive portal parameters -->
+        <input type="hidden" name="clientmac" value="{{ clientmac }}">
+        <input type="hidden" name="url" value="{{ url }}">
+
+        <input type="text" name="user" placeholder="Room No." required>
+        <input type="text" name="password" placeholder="Last Name" required>
+
+        <button type="submit">Log In</button>
+    </form>
+</div>
+
+</body>
+</html>

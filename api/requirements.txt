@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+jinja2
+python-multipart
+python-dotenv
+rbh-builder-python>=0.1.0

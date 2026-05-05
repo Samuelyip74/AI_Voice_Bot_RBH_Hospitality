@@ -1,4 +1,45 @@
 services:
+  apache:
+    image: httpd:2.4
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./apache/apache.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./apache/certs:/usr/local/apache2/conf/certs:ro
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+      - ./frontend/dist:/usr/local/apache2/htdocs
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  frontend-build:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - ./frontend/dist:/app/dist
+    command: sh -c "npm install && npm run build && cp index.html dist/index.html"
+    profiles:
+      - build
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+
+  api:
+    build: ./api
+    env_file:
+      - path: ./api/app/.env
+        required: false
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
   asterisk:
     build:
       context: .
@@ -32,6 +73,17 @@ services:
              mkdir -p /var/log/asterisk/cdr-csv /var/log/asterisk/ai/calls;
              chown -R asterisk:asterisk /var/lib/asterisk/sounds/ai /var/log/asterisk/ai /var/log/asterisk/cdr-csv || true;
              exec su -s /bin/sh asterisk -c 'asterisk -f -vvv'"
+
+  freeradius:
+    image: freeradius/freeradius-server:latest
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    volumes:
+      - ./freeradius:/etc/freeradius
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
   asterisk_sounds_ai:

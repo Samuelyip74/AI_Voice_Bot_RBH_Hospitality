@@ -5,6 +5,8 @@
 agi/.env
 agi/.env.*
 !agi/.env.example
+api/app/env
+api/app/env copy.sample
 *.pem
 *.key
 *.crt
@@ -40,6 +42,10 @@ asterisk/*.tmp
 # Docker and local tooling
 *.log
 docker-compose.override.yml
+
+# Frontend generated artifacts
+node_modules/
+frontend/dist/
 
 # Editor and OS files
 .vscode/

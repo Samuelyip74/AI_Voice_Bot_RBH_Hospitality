@@ -1,0 +1,28 @@
+rest {
+    timeout = 5
+
+    authorize {
+        uri = "http://api:8000/radius/auth"
+        method = "post"
+        body = "json"
+
+        send {
+            username = "%{User-Name}"
+            password = "%{User-Password}"
+            nas_ip   = "%{NAS-IP-Address}"
+        }
+
+        recv {
+            ok = 200
+            fail = 401
+        }
+    }
+
+    pool {
+        start = 0
+        min = 0
+        max = 5
+        spare = 1
+    }
+}
+
