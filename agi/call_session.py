@@ -453,6 +453,8 @@ def determine_transfer_action(
 class CallSession:
     call_id: str
     caller_id: str = ""
+    caller_name: str = ""
+    sip_from_header: str = ""
     preferred_language: str = "en"
     detected_language: str = "en"
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -468,7 +470,14 @@ class CallSession:
         raw_id = agi_env.get("agi_uniqueid") or str(uuid.uuid4())
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", raw_id)
         caller_id = agi_env.get("agi_callerid") or agi_env.get("agi_calleridname") or "unknown"
-        return cls(call_id=safe_id, caller_id=caller_id, preferred_language=default_language, detected_language=default_language)
+        caller_name = agi_env.get("agi_calleridname", "")
+        return cls(
+            call_id=safe_id,
+            caller_id=caller_id,
+            caller_name=caller_name,
+            preferred_language=default_language,
+            detected_language=default_language,
+        )
 
     def append_event(self, event_type: str, payload: dict[str, Any]) -> None:
         self.updated_at = time.time()

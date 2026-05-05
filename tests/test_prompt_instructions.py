@@ -28,6 +28,8 @@ def test_prompt_preserves_transfer_routes():
     assert "transfer_to_extension tool with extension 1920" in ASSISTANT_INSTRUCTIONS
     assert "transfer_to_extension tool with extension 1921" in ASSISTANT_INSTRUCTIONS
     assert "Transfer to 1921 only if the guest explicitly asks" in ASSISTANT_INSTRUCTIONS
+    assert "Direct room transfer" in ASSISTANT_INSTRUCTIONS
+    assert "transfer_type set to room" in ASSISTANT_INSTRUCTIONS
 
 
 def test_prompt_can_end_call_when_guest_is_done():

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import signal
 import struct
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formataddr
 from urllib import request
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
 
@@ -68,6 +70,19 @@ ROOM_SERVICE_TRANSFER_PHRASES = {
     "id": "Tentu. Saya akan menghubungkan Anda ke tim in-room dining sekarang. Mohon tunggu sebentar.",
 }
 
+ROOM_TRANSFER_PHRASES = {
+    "en": "Of course. I'll connect you to the room now. Please hold for a moment.",
+    "zh": "当然可以。我现在为您转接到房间，请稍等。",
+    "zh-yue": "當然可以。我而家幫你轉接去房間，請稍等。",
+    "ms": "Baik, saya akan sambungkan anda ke bilik itu sekarang. Sila tunggu sebentar.",
+    "ta": "நிச்சயமாக. இப்போது உங்களை அந்த அறைக்கு இணைக்கிறேன். தயவுசெய்து காத்திருக்கவும்.",
+    "ja": "かしこまりました。ただいまお部屋へおつなぎします。少々お待ちください。",
+    "ko": "물론입니다. 지금 객실로 연결해 드리겠습니다. 잠시만 기다려 주세요.",
+    "th": "ได้ค่ะ ฉันจะโอนสายไปยังห้องพักนั้น กรุณาถือสายรอสักครู่",
+    "vi": "Dạ được. Tôi sẽ chuyển quý khách đến phòng đó ngay bây giờ. Xin vui lòng chờ trong giây lát.",
+    "id": "Tentu. Saya akan menghubungkan Anda ke kamar tersebut sekarang. Mohon tunggu sebentar.",
+}
+
 UNAVAILABLE_PHRASES = {
     "en": "I'm sorry, my colleague is not available right now.",
     "zh": "抱歉，我的同事现在无法接听。",
@@ -96,6 +111,7 @@ CLOSING_PHRASES = {
 
 
 DEFAULT_GREETING_TEXT = "Hello, this is the AI assistant. How can I help you today?"
+DEFAULT_PERSONAL_GREETING_TEXT = "Hello {caller_name}, my name is Nova, your personal AI Voicebot. How can I help you today?"
 
 
 def parse_agi_env(stdin: object = sys.stdin) -> dict[str, str]:
@@ -152,8 +168,20 @@ def agi_hangup() -> str:
     return agi_command("HANGUP")
 
 
+def agi_goto(context: str, extension: str, priority: int = 1) -> str:
+    return agi_command(f"SET CONTEXT {context}") + " | " + agi_command(f"SET EXTENSION {extension}") + " | " + agi_command(f"SET PRIORITY {priority}")
+
+
 def agi_get_variable(name: str) -> str:
     return agi_command(f"GET VARIABLE {name}")
+
+
+def agi_variable_value(response: str) -> str:
+    if not response.startswith("200 result=1"):
+        return ""
+    if "(" not in response or ")" not in response:
+        return ""
+    return response.split("(", 1)[1].rsplit(")", 1)[0]
 
 
 def agi_channel_status() -> str:
@@ -193,6 +221,61 @@ def transfer_target_for_extension(extension: str) -> str:
     return template.format(extension=extension)
 
 
+def parse_sip_from_header(from_header: str) -> dict[str, str]:
+    display_name = ""
+    sip_user = ""
+    header = from_header.strip()
+    if '"' in header:
+        parts = header.split('"')
+        if len(parts) >= 3:
+            display_name = parts[1].strip()
+    elif "<" in header:
+        display_name = header.split("<", 1)[0].strip()
+    if "sip:" in header:
+        sip_part = header.split("sip:", 1)[1]
+        sip_user = sip_part.split("@", 1)[0].strip()
+    return {"display_name": unquote(display_name), "sip_user": unquote(sip_user)}
+
+
+def enrich_session_caller_details(session: CallSession) -> None:
+    caller_name = agi_variable_value(agi_get_variable("AI_CALLER_NAME"))
+    caller_num = agi_variable_value(agi_get_variable("AI_CALLER_NUM"))
+    sip_from = agi_variable_value(agi_get_variable("AI_SIP_FROM"))
+    parsed_from = parse_sip_from_header(sip_from)
+
+    session.sip_from_header = sip_from
+    if caller_name:
+        session.caller_name = caller_name
+    elif parsed_from.get("display_name"):
+        session.caller_name = parsed_from["display_name"]
+
+    if caller_num:
+        session.caller_id = caller_num
+    elif parsed_from.get("sip_user"):
+        session.caller_id = parsed_from["sip_user"]
+
+
+def greeting_caller_name(caller_name: str) -> str:
+    name = (caller_name or "").strip()
+    if not name:
+        return ""
+    for separator in (" - ", "|", "/"):
+        if separator in name:
+            name = name.split(separator, 1)[0].strip()
+    name = re.sub(r"\s+", " ", name)
+    if not re.search(r"[A-Za-z\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", name):
+        return ""
+    return name[:60]
+
+
+def build_greeting_text(session: CallSession) -> tuple[str, bool]:
+    caller_name = greeting_caller_name(session.caller_name)
+    if caller_name and os.getenv("AI_GREETING_PERSONALIZE", "true").lower() == "true":
+        template = os.getenv("AI_GREETING_PERSONAL_TEXT", DEFAULT_PERSONAL_GREETING_TEXT)
+        return template.format(caller_name=caller_name), True
+    return os.getenv("AI_GREETING_TEXT", DEFAULT_GREETING_TEXT), False
+
+
 def normalize_transfer_extension(extension: str, transfer_type: str, human_extension: str, room_service_extension: str) -> str:
     value = (extension or "").strip().lower().replace("-", "_").replace(" ", "_")
     room_service_aliases = {"1921", "room_service", "in_room_dining", "in-room_dining", "dining", "restaurant"}
@@ -213,6 +296,8 @@ def normalize_transfer_extension(extension: str, transfer_type: str, human_exten
         return room_service_extension
     if transfer_type == "human" or value in human_aliases:
         return human_extension
+    if transfer_type == "room" and value.isdigit():
+        return value
     return extension if extension.isdigit() else human_extension
 
 
@@ -222,6 +307,8 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
     body = {
         "call_id": session.call_id,
         "caller_id": session.caller_id,
+        "caller_name": session.caller_name,
+        "sip_from_header": session.sip_from_header,
         "preferred_language": session.preferred_language,
         "request": payload,
         "submitted_at": time.time(),
@@ -248,6 +335,7 @@ def transcript_text(session: CallSession) -> str:
     lines = [
         f"Call ID: {session.call_id}",
         f"Caller ID: {session.caller_id}",
+        f"Caller name: {session.caller_name}",
         f"Preferred language: {session.preferred_language}",
         "",
         "Transcript:",
@@ -356,6 +444,7 @@ def send_service_request_email(session: CallSession, request_payload: dict, subm
             "",
             f"Call ID: {session.call_id}",
             f"Caller ID: {session.caller_id}",
+            f"Caller name: {session.caller_name}",
             f"Preferred language: {session.preferred_language}",
             "",
             "Request:",
@@ -437,6 +526,10 @@ def service_request_confirmation_text(action: dict, language: str) -> str:
         return f"Mohon konfirmasi: apakah Anda ingin saya mengirim permintaan ini, {summary}{room_text}?"
     room_text = f" for room {room}" if room else ""
     return f"Please confirm: would you like me to submit this request, {summary}{room_text}?"
+
+
+def transfer_reclaim_enabled() -> bool:
+    return os.getenv("TRANSFER_RECLAIM_ON_FAILURE", "true").lower() == "true"
 
 
 async def synthesize_text_phrase(
@@ -548,12 +641,23 @@ async def run_call() -> int:
     source_rate = int(os.getenv("ASTERISK_EAGI_SAMPLE_RATE", "8000"))
     enable_ready_tone = os.getenv("ENABLE_READY_TONE", "false").lower() == "true"
     enable_ai_greeting = os.getenv("ENABLE_AI_GREETING", "true").lower() == "true"
-    greeting_text = os.getenv("AI_GREETING_TEXT", DEFAULT_GREETING_TEXT)
     no_audio_max_turns = int(os.getenv("NO_AUDIO_MAX_TURNS", "20"))
 
     agi_verbose(f"AI assistant call started id={session.call_id}", 1)
     agi_answer()
-    session.append_event("call_started", {"caller_id": session.caller_id, "codec": source_codec, "sample_rate": source_rate})
+    enrich_session_caller_details(session)
+    greeting_text, greeting_personalized = build_greeting_text(session)
+    session.append_event(
+        "call_started",
+        {
+            "caller_id": session.caller_id,
+            "caller_name": session.caller_name,
+            "sip_from_header": session.sip_from_header,
+            "greeting_personalized": greeting_personalized,
+            "codec": source_codec,
+            "sample_rate": source_rate,
+        },
+    )
 
     if enable_ready_tone:
         try:
@@ -574,7 +678,15 @@ async def run_call() -> int:
             agi_verbose("AI assistant preparing greeting", 1)
             greeting_wav = await synthesize_cached_greeting(client, session, greeting_text, sounds_dir)
             greeting_response = agi_stream_file(str(greeting_wav.with_suffix("")))
-            session.append_event("greeting_played", {"file": str(greeting_wav), "text": greeting_text, "agi_response": greeting_response})
+            session.append_event(
+                "greeting_played",
+                {
+                    "file": str(greeting_wav),
+                    "text": greeting_text,
+                    "personalized": greeting_personalized,
+                    "agi_response": greeting_response,
+                },
+            )
         except Exception as exc:
             LOGGER.exception("Could not synthesize or play AI greeting")
             session.append_event("greeting_error", {"error": str(exc)})
@@ -660,7 +772,11 @@ async def run_call() -> int:
                 reason = result.transfer_action.get("reason", "model requested transfer")
                 target_extension = result.transfer_action.get("extension", transfer_extension)
                 transfer_type = result.transfer_action.get("transfer_type") or (
-                    "room_service" if target_extension == room_service_transfer_extension else "human"
+                    "room_service"
+                    if target_extension == room_service_transfer_extension
+                    else "room"
+                    if str(target_extension).isdigit() and str(target_extension) not in {str(transfer_extension), str(room_service_transfer_extension)}
+                    else "human"
                 )
                 target_extension = normalize_transfer_extension(
                     target_extension,
@@ -777,7 +893,12 @@ async def run_call() -> int:
 
             if transfer:
                 session.request_transfer(reason or "transfer requested")
-                phrase_map = ROOM_SERVICE_TRANSFER_PHRASES if transfer_type == "room_service" else TRANSFER_PHRASES
+                if transfer_type == "room_service":
+                    phrase_map = ROOM_SERVICE_TRANSFER_PHRASES
+                elif transfer_type == "room":
+                    phrase_map = ROOM_TRANSFER_PHRASES
+                else:
+                    phrase_map = TRANSFER_PHRASES
                 phrase = phrase_map.get(session.preferred_language, phrase_map["en"])
                 try:
                     transfer_wav = await synthesize_transfer_phrase(client, session, phrase, sounds_dir, turn)
@@ -813,10 +934,15 @@ async def run_call() -> int:
                         channel_status = agi_channel_status()
                         session.append_event("channel_status_after_transfer_failure", {"response": channel_status})
                         if agi_response_is_dead_channel(channel_status):
+                            session.append_event("transfer_reclaim_unavailable", {"reason": "dead channel after transfer failure"})
                             session.append_event("hangup", {"reason": "dead channel after transfer failure"})
                             break
                     except Exception as exc:
                         session.append_event("hangup", {"reason": "channel status failed after transfer", "error": str(exc)})
+                        break
+                    if transfer_reclaim_enabled():
+                        reclaim_response = agi_goto("internal", "reclaim", 1)
+                        session.append_event("transfer_reclaim_requested", {"response": reclaim_response})
                         break
                     continue
                 break
@@ -832,7 +958,8 @@ async def run_call() -> int:
     finalize_transcript_email(session)
 
     try:
-        agi_hangup()
+        if not (session.history and session.history[-1].get("type") == "transfer_reclaim_requested"):
+            agi_hangup()
     except Exception:
         LOGGER.debug("Could not send AGI HANGUP after call ended", exc_info=True)
     return 0

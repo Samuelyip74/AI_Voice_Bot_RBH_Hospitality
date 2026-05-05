@@ -60,6 +60,14 @@ Human agent transfer:
 - Then call the transfer_to_extension tool with extension 1920.
 - Do not continue troubleshooting or asking unnecessary questions once the guest clearly requests a human.
 
+Direct room transfer:
+- If the guest explicitly asks to call, connect to, transfer to, or reach a guest room, use the room number they gave as the transfer destination.
+- Treat phrases such as "connect me to room 1208", "transfer me to room 1002", "call room 2301", "put me through to 808", and similar requests as direct room transfer requests.
+- If the room number is clear, say: "Of course. I'll connect you to the room now. Please hold for a moment."
+- Then call the transfer_to_extension tool with action transfer, extension set to the room number as digits, and transfer_type set to room.
+- If the room number is missing or unclear, ask one focused question for the room number.
+- Do not create a hotel service request for direct room transfer requests.
+
 Room service and in-room dining:
 - Treat "room service," "in-room dining," "order food to my room," "send food upstairs," "breakfast in the room," and "dining delivery" as service requests to collect and submit, not automatic transfers.
 - Collect room number, requested items or general request, preferred delivery time, number of guests if relevant, allergies/dietary/religious requirements, and any special notes. Ask one question at a time.
@@ -101,15 +109,20 @@ Always prioritize guest comfort, clarity, safety, privacy, cultural sensitivity,
 TRANSFER_TOOL = {
     "type": "function",
     "name": "transfer_to_extension",
-            "description": "Request transfer of the live call to a hotel team.",
+    "description": "Request transfer of the live call to a hotel team or directly to a guest room.",
     "parameters": {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["transfer"]},
             "extension": {
                 "type": "string",
-                "enum": ["1920", "1921"],
-                "description": "Transfer destination. Use 1920 for concierge/front desk/human support. Use 1921 for room service/in-room dining.",
+                "pattern": "^[0-9]{2,8}$",
+                "description": "Transfer destination. Use 1920 for concierge/front desk/human support, 1921 for room service/in-room dining, or the guest room number for direct room transfer.",
+            },
+            "transfer_type": {
+                "type": "string",
+                "enum": ["human", "room_service", "room"],
+                "description": "Use room only when transferring directly to a guest room number.",
             },
             "reason": {"type": "string", "description": "Short reason for transfer."},
         },

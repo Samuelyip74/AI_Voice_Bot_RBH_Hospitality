@@ -45,11 +45,29 @@ def test_transfer_alias_room_service_normalizes_to_1921():
     assert normalize_transfer_extension("in_room_dining", "room_service", "1920", "1921") == "1921"
 
 
+def test_room_transfer_keeps_guest_room_number():
+    assert normalize_transfer_extension("1208", "room", "1920", "1921") == "1208"
+
+
 def test_parse_model_transfer_args(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     client = OpenAIRealtimeClient()
     parsed = client._parse_transfer_args('{"action":"transfer","extension":"1920","reason":"concierge help"}')
     assert parsed == {"action": "transfer", "extension": "1920", "reason": "concierge help"}
+
+
+def test_parse_model_room_transfer_args(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = OpenAIRealtimeClient()
+    parsed = client._parse_transfer_args(
+        '{"action":"transfer","extension":"1208","transfer_type":"room","reason":"guest requested room transfer"}'
+    )
+    assert parsed == {
+        "action": "transfer",
+        "extension": "1208",
+        "transfer_type": "room",
+        "reason": "guest requested room transfer",
+    }
 
 
 def test_parse_service_request_args(monkeypatch):
