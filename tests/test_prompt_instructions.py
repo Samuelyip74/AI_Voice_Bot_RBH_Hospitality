@@ -11,6 +11,7 @@ def test_prompt_requires_context_intake():
     assert "collect the minimum missing context" in ASSISTANT_INSTRUCTIONS
     assert "Ask one focused question at a time" in ASSISTANT_INSTRUCTIONS
     assert "Do not ask for details already known" in ASSISTANT_INSTRUCTIONS
+    assert "use that room number for hotel service requests" in ASSISTANT_INSTRUCTIONS
     assert "Do not reintroduce yourself as Nova again" in ASSISTANT_INSTRUCTIONS
     assert "Do not call transfer_to_extension merely because the guest asks for food" in ASSISTANT_INSTRUCTIONS
 
@@ -58,3 +59,31 @@ def test_prior_call_context_keeps_known_room_after_silence_events():
     assert "Known details" in context
     assert "audio_ignored" not in context
     assert "silence_prompt_played" not in context
+
+
+def test_prior_call_context_includes_room_from_caller_identity():
+    session = CallSession(
+        call_id="ctx",
+        caller_id="99902200110783813606957949",
+        caller_name="Samuel Yip - 1910 - EN",
+        room_number="1910",
+    )
+    session.history = [{"type": "call_started", "caller_name": session.caller_name, "room_number": session.room_number}]
+
+    context = build_prior_call_context(session)
+
+    assert "Caller room number from caller identity: 1910" in context
+    assert '"room_number": "1910"' in context
+
+
+def test_turn_instructions_include_known_room(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    from openai_realtime_client import OpenAIRealtimeClient
+
+    client = OpenAIRealtimeClient()
+    session = CallSession(call_id="ctx", room_number="1910")
+
+    instructions = client._turn_instructions(session)
+
+    assert "Known caller room number is 1910" in instructions
+    assert "do not ask for the room number again" in instructions

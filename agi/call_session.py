@@ -492,6 +492,7 @@ class CallSession:
     call_id: str
     caller_id: str = ""
     caller_name: str = ""
+    room_number: str = ""
     sip_from_header: str = ""
     preferred_language: str = "en"
     detected_language: str = "en"
@@ -513,6 +514,7 @@ class CallSession:
             call_id=safe_id,
             caller_id=caller_id,
             caller_name=caller_name,
+            room_number=agi_env.get("agi_callerroom", ""),
             preferred_language=default_language,
             detected_language=default_language,
         )

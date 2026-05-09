@@ -36,11 +36,12 @@ Primary mission:
 Conversation method:
 1. Identify the service category: front desk/concierge, wake-up call, housekeeping, room service, dining reservation, transportation, local recommendation, spa, event support, emergency/safety, complaint, lost item, or general information.
 2. Extract any details already provided by the guest. Do not ask for details already known.
-3. Ask for the next missing required detail for that category.
-4. For critical details, repeat them back and ask for confirmation.
-5. For routine service requests, collect the required details, repeat the complete request back to the guest, and ask for explicit confirmation before submitting. Only call submit_hotel_request after the guest clearly confirms with words like yes, correct, confirmed, that's right, okay, please proceed, or equivalent in the guest's language.
-6. Transfer only when the guest explicitly asks to speak to, call, connect to, or be transferred to a person or team, or when there is an emergency/safety issue. Do not call transfer_to_extension merely because the guest asks for food, housekeeping, room cleaning, a wake-up call, transportation, a recommendation, or another routine service request.
-7. When the guest clearly says there are no more requests, thanks you and says goodbye, says "that's all", "nothing else", "no more", "no thank you", "bye", or similar, give a brief courteous closing in the guest's current language, then call the end_call tool. Do not ask another follow-up question after the guest has closed the conversation.
+3. If Prior call context includes a Known details room_number, use that room number for hotel service requests. Do not ask for the room number again unless the guest says it is wrong, gives a different room, or the known room number is missing.
+4. Ask for the next missing required detail for that category.
+5. For critical details, repeat them back and ask for confirmation.
+6. For routine service requests, collect the required details, repeat the complete request back to the guest, and ask for explicit confirmation before submitting. Only call submit_hotel_request after the guest clearly confirms with words like yes, correct, confirmed, that's right, okay, please proceed, or equivalent in the guest's language.
+7. Transfer only when the guest explicitly asks to speak to, call, connect to, or be transferred to a person or team, or when there is an emergency/safety issue. Do not call transfer_to_extension merely because the guest asks for food, housekeeping, room cleaning, a wake-up call, transportation, a recommendation, or another routine service request.
+8. When the guest clearly says there are no more requests, thanks you and says goodbye, says "that's all", "nothing else", "no more", "no thank you", "bye", or similar, give a brief courteous closing in the guest's current language, then call the end_call tool. Do not ask another follow-up question after the guest has closed the conversation.
 
 Details to collect by request type:
 - Wake-up call: room number, date, time, AM/PM or 24-hour confirmation, one-time or repeated wake-up call, guest name if offered, preferred language if relevant. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category wake_up_call and confirmed_with_guest true.
@@ -245,6 +246,9 @@ def build_prior_call_context(session: CallSession, max_dialogue_events: int = 12
     ]
     if session.caller_name:
         lines.append(f"Caller name: {session.caller_name}")
+    if session.room_number:
+        known["room_number"] = session.room_number
+        lines.append(f"Caller room number from caller identity: {session.room_number}")
     if known:
         lines.append("Known details: " + json.dumps(known, ensure_ascii=False))
     if pending:
@@ -377,9 +381,16 @@ class OpenAIRealtimeClient:
     def _turn_instructions(self, session: CallSession) -> str:
         language_code = session.preferred_language
         language_name = SUPPORTED_LANGUAGES.get(language_code, language_code)
+        room_hint = ""
+        if session.room_number:
+            room_hint = (
+                f" Known caller room number is {session.room_number}; use it for hotel service requests "
+                "and do not ask for the room number again unless the guest corrects it."
+            )
         return (
             f"Detected caller language for this turn: {language_name} ({language_code}). "
             f"{language_response_instruction(language_code)} "
+            f"{room_hint} "
             "This turn's detected language overrides prior conversation language. "
             "If the guest explicitly asks to use another language, switch to that requested language immediately. "
             "Do not reintroduce yourself; the call greeting has already been played. "

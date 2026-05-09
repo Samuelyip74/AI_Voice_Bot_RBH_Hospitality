@@ -275,9 +275,34 @@ def parse_sip_from_header(from_header: str) -> dict[str, str]:
     return {"display_name": unquote(display_name), "sip_user": unquote(sip_user)}
 
 
+def extract_room_number_from_caller_identity(*values: str) -> str:
+    """Best-effort room extraction from Rainbow caller display names.
+
+    Common examples are "Samuel Yip - 1910 - EN", "Room 1910 - Samuel",
+    and "1001 SG Operator". The extracted value is only a convenience hint;
+    the guest can still correct it during the call.
+    """
+    for raw_value in values:
+        value = (raw_value or "").strip()
+        if not value:
+            continue
+
+        patterns = [
+            r"(?:^|\s-\s)(\d{3,6})(?:\s-\s|$)",
+            r"\b(?:room|rm|房间|房間|房号|房號)\s*#?\s*(\d{3,6})\b",
+            r"^\s*(\d{3,6})\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return ""
+
+
 def enrich_session_caller_details(session: CallSession) -> None:
     caller_name = agi_variable_value(agi_get_variable("AI_CALLER_NAME"))
     caller_num = agi_variable_value(agi_get_variable("AI_CALLER_NUM"))
+    caller_room = agi_variable_value(agi_get_variable("AI_CALLER_ROOM"))
     sip_from = agi_variable_value(agi_get_variable("AI_SIP_FROM"))
     parsed_from = parse_sip_from_header(sip_from)
 
@@ -291,6 +316,12 @@ def enrich_session_caller_details(session: CallSession) -> None:
         session.caller_id = caller_num
     elif parsed_from.get("sip_user"):
         session.caller_id = parsed_from["sip_user"]
+
+    session.room_number = (
+        caller_room
+        or session.room_number
+        or extract_room_number_from_caller_identity(session.caller_name, parsed_from.get("display_name", ""), session.caller_id)
+    )
 
 
 def greeting_caller_name(caller_name: str) -> str:
@@ -404,98 +435,28 @@ def normalize_transfer_extension(extension: str, transfer_type: str, human_exten
     return extension if extension.isdigit() else human_extension
 
 
-def model_transfer_action_is_allowed(
-    transcript: str,
-    action: dict | None,
-    human_extension: str,
-    room_service_extension: str,
-) -> tuple[bool, str | None]:
-    """Only honor model transfer tool calls when the caller explicitly asked for transfer.
-
-    The Realtime model can occasionally emit a transfer tool call while also asking a
-    normal service-intake question. This guard keeps routine hotel service requests in
-    the collection/confirmation flow unless the caller clearly requested a live team,
-    a room-service team, a direct room transfer, or emergency escalation.
-    """
-    if not action:
-        return False, "missing transfer action"
-
-    normalized = transcript.lower()
-    raw_extension = str(action.get("extension", "")).strip()
-    transfer_type = (action.get("transfer_type") or "").strip().lower()
-    target_extension = normalize_transfer_extension(raw_extension, transfer_type, human_extension, room_service_extension)
-    effective_type = transfer_type or (
-        "room_service"
-        if target_extension == room_service_extension
-        else "room"
-        if target_extension.isdigit() and target_extension not in {str(human_extension), str(room_service_extension)}
-        else "human"
-    )
-
-    deterministic = determine_transfer_action(
-        transcript,
-        human_extension=human_extension,
-        room_service_extension=room_service_extension,
-    )
-    if deterministic and deterministic.get("transfer_type") == effective_type:
-        return True, None
-
-    if effective_type == "human":
-        explicit_human = re.search(
-            r"\b(transfer|connect|call|dial|reach|speak|talk|put me through|route)\b"
-            r".*\b(1920|front desk|frontdesk|reception|receptionist|concierge|operator|human|agent|manager|person|staff)\b",
-            normalized,
-        )
-        explicit_human_zh = re.search(
-            r"(转接|轉接|接去|连接|連接|打给|打給|叫|找|搵).{0,12}"
-            r"(1920|前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|同事|工作人员|工作人員)"
-            r"|"
-            r"(1920|前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|同事|工作人员|工作人員).{0,12}"
-            r"(转接|轉接|接听|接聽|连接|連接|帮我|幫我|可以吗|可以嗎)",
-            normalized,
-        )
-        if explicit_human or explicit_human_zh:
-            return True, None
-        return False, "caller did not explicitly request a human/front-desk transfer"
-
-    if effective_type == "room_service":
-        explicit_room_service = re.search(
-            r"\b(transfer|connect|call|dial|reach|speak|talk|put me through|route)\b"
-            r".*\b(1921|room service|in-room dining|in room dining)\b",
-            normalized,
-        )
-        explicit_room_service_zh = re.search(
-            r"(转接|轉接|接去|连接|連接|打给|打給|找|搵).{0,12}"
-            r"(1921|客房服务|客房服務|送餐|房餐|餐饮|餐飲)",
-            normalized,
-        )
-        if explicit_room_service or explicit_room_service_zh:
-            return True, None
-        return False, "room-service request is not an explicit request to transfer to room-service staff"
-
-    if effective_type == "room":
-        escaped_extension = re.escape(target_extension)
-        explicit_room = re.search(
-            rf"\b(transfer|connect|call|dial|reach|put me through|route)\b.*\b(room\s*)?{escaped_extension}\b",
-            normalized,
-        )
-        if explicit_room:
-            return True, None
-        return False, "caller did not explicitly request a direct room transfer"
-
-    return False, f"unknown transfer type {effective_type!r}"
-
-
 def build_hotel_request_body(session: CallSession, payload: dict) -> dict:
     return {
         "call_id": session.call_id,
         "caller_id": session.caller_id,
         "caller_name": session.caller_name,
+        "caller_room_number": session.room_number,
         "sip_from_header": session.sip_from_header,
         "preferred_language": session.preferred_language,
         "request": payload,
         "submitted_at": time.time(),
     }
+
+
+def apply_known_room_number(session: CallSession, payload: dict | None) -> dict | None:
+    if not payload:
+        return payload
+    if payload.get("room_number") or not session.room_number:
+        return payload
+    updated = dict(payload)
+    updated["room_number"] = session.room_number
+    updated["room_number_source"] = "caller_identity"
+    return updated
 
 
 def post_hotel_request(session: CallSession, payload: dict) -> dict:
@@ -1031,6 +992,7 @@ async def run_call() -> int:
         {
             "caller_id": session.caller_id,
             "caller_name": session.caller_name,
+            "room_number": session.room_number,
             "sip_from_header": session.sip_from_header,
             "greeting_personalized": greeting_personalized,
             "codec": source_codec,
@@ -1215,6 +1177,8 @@ async def run_call() -> int:
             )
             if deterministic_action and result.transfer_action is None:
                 result.transfer_action = deterministic_action
+            if result.service_request_action:
+                result.service_request_action = apply_known_room_number(session, result.service_request_action)
 
             should_end_call, end_call_reason = should_end_call_deterministic(result.transcript)
             if should_end_call and result.end_call_action is None:
@@ -1227,47 +1191,30 @@ async def run_call() -> int:
             target_extension = transfer_extension
             transfer_type = "human"
             if result.transfer_action:
-                allowed, suppressed_reason = model_transfer_action_is_allowed(
-                    result.transcript,
-                    result.transfer_action,
+                transfer = True
+                reason = result.transfer_action.get("reason", "model requested transfer")
+                target_extension = result.transfer_action.get("extension", transfer_extension)
+                transfer_type = result.transfer_action.get("transfer_type") or (
+                    "room_service"
+                    if target_extension == room_service_transfer_extension
+                    else "room"
+                    if str(target_extension).isdigit() and str(target_extension) not in {str(transfer_extension), str(room_service_transfer_extension)}
+                    else "human"
+                )
+                target_extension = normalize_transfer_extension(
+                    target_extension,
+                    transfer_type,
                     transfer_extension,
                     room_service_transfer_extension,
                 )
-                if not allowed:
-                    session.append_event(
-                        "transfer_action_suppressed",
-                        {
-                            "reason": suppressed_reason,
-                            "model_action": result.transfer_action,
-                            "transcript": result.transcript,
-                        },
-                    )
-                    result.transfer_action = None
-                else:
-                    transfer = True
-                    reason = result.transfer_action.get("reason", "model requested transfer")
-                    target_extension = result.transfer_action.get("extension", transfer_extension)
-                    transfer_type = result.transfer_action.get("transfer_type") or (
-                        "room_service"
-                        if target_extension == room_service_transfer_extension
-                        else "room"
-                        if str(target_extension).isdigit() and str(target_extension) not in {str(transfer_extension), str(room_service_transfer_extension)}
-                        else "human"
-                    )
-                    target_extension = normalize_transfer_extension(
-                        target_extension,
-                        transfer_type,
-                        transfer_extension,
-                        room_service_transfer_extension,
-                    )
-                    session.append_event(
-                        "transfer_action_detected",
-                        {
-                            "extension": target_extension,
-                            "transfer_type": transfer_type,
-                            "reason": reason,
-                        },
-                    )
+                session.append_event(
+                    "transfer_action_detected",
+                    {
+                        "extension": target_extension,
+                        "transfer_type": transfer_type,
+                        "reason": reason,
+                    },
+                )
             if result.service_request_action:
                 session.append_event("service_request_action_detected", result.service_request_action)
             if result.end_call_action:

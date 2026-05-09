@@ -7,7 +7,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agi"))
 from call_session import CallSession, determine_transfer_action, should_end_call_deterministic, should_transfer_deterministic
 from openai_realtime_client import OpenAIRealtimeClient
 from voice_assistant_eagi import (
-    model_transfer_action_is_allowed,
     normalize_transfer_extension,
     notify_rainbow_service_request,
     rainbow_service_request_destination,
@@ -63,90 +62,6 @@ def test_transfer_alias_room_service_normalizes_to_1921():
 
 def test_room_transfer_keeps_guest_room_number():
     assert normalize_transfer_extension("1208", "room", "1920", "1921") == "1208"
-
-
-def test_model_human_transfer_suppressed_for_food_order_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "I'd like to order some food.",
-        {"action": "transfer", "extension": "1920", "transfer_type": "human", "reason": "guest requested concierge"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is False
-    assert "explicitly request" in reason
-
-
-def test_model_room_service_transfer_suppressed_for_food_order_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "I'd like to order some food.",
-        {"action": "transfer", "extension": "1921", "transfer_type": "room_service", "reason": "food order"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is False
-    assert "not an explicit request" in reason
-
-
-def test_model_human_transfer_allowed_for_front_desk_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "Please connect me to the front desk.",
-        {"action": "transfer", "extension": "1920", "transfer_type": "human", "reason": "front desk"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is True
-    assert reason is None
-
-
-def test_model_human_transfer_allowed_for_chinese_front_desk_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "你可以幫我轉接去前台嗎?",
-        {"action": "transfer", "extension": "1920", "transfer_type": "human", "reason": "客人要求转接前台"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is True
-    assert reason is None
-
-
-def test_model_room_service_transfer_allowed_for_explicit_room_service_staff_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "Please connect me to room service.",
-        {"action": "transfer", "extension": "1921", "transfer_type": "room_service", "reason": "room service staff"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is True
-    assert reason is None
-
-
-def test_model_room_service_transfer_allowed_for_chinese_room_service_staff_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "可以幫我轉接去客房服務嗎?",
-        {"action": "transfer", "extension": "1921", "transfer_type": "room_service", "reason": "客人要求转接客房服务"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is True
-    assert reason is None
-
-
-def test_model_room_transfer_allowed_for_direct_room_request():
-    allowed, reason = model_transfer_action_is_allowed(
-        "Can you connect me to room 1208?",
-        {"action": "transfer", "extension": "1208", "transfer_type": "room", "reason": "direct room transfer"},
-        "1920",
-        "1921",
-    )
-
-    assert allowed is True
-    assert reason is None
 
 
 def test_short_low_confidence_foreign_transcript_is_ignored():

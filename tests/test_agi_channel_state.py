@@ -8,7 +8,9 @@ from voice_assistant_eagi import (
     agi_response_is_dead_channel,
     agi_result_code,
     agi_variable_value,
+    apply_known_room_number,
     build_greeting_text,
+    extract_room_number_from_caller_identity,
     greeting_caller_name,
     parse_sip_from_header,
     transfer_reclaim_enabled,
@@ -46,6 +48,30 @@ def test_parse_sip_from_header_extracts_display_name_and_user():
 
 def test_greeting_caller_name_removes_routing_suffix():
     assert greeting_caller_name("Samuel Yip - 1910 - EN") == "Samuel Yip"
+
+
+def test_extract_room_number_from_caller_identity_routing_suffix():
+    assert extract_room_number_from_caller_identity("Samuel Yip - 1910 - EN") == "1910"
+
+
+def test_extract_room_number_from_caller_identity_leading_number():
+    assert extract_room_number_from_caller_identity("1001 SG Operator") == "1001"
+
+
+def test_apply_known_room_number_to_service_request():
+    session = CallSession(call_id="room-test", room_number="1001")
+    payload = apply_known_room_number(session, {"category": "housekeeping", "summary": "Clean room"})
+
+    assert payload["room_number"] == "1001"
+    assert payload["room_number_source"] == "caller_identity"
+
+
+def test_apply_known_room_number_keeps_guest_supplied_room():
+    session = CallSession(call_id="room-test", room_number="1001")
+    payload = apply_known_room_number(session, {"category": "housekeeping", "room_number": "1208"})
+
+    assert payload["room_number"] == "1208"
+    assert "room_number_source" not in payload
 
 
 def test_build_greeting_text_personalizes_with_caller_name(monkeypatch):
