@@ -144,6 +144,7 @@ def capture_utterance_from_fd3(
     max_seconds: int = 15,
     silence_threshold_dbfs: float = -42.0,
     initial_audio_timeout_seconds: float = 8.0,
+    no_speech_timeout_seconds: float = 5.0,
 ) -> bytes:
     """Read caller audio from EAGI fd 3 until trailing silence or max length.
 
@@ -157,6 +158,7 @@ def capture_utterance_from_fd3(
     chunks: list[bytes] = []
     speech_started = False
     silence_ms = 0
+    started_at = time.monotonic()
     deadline = time.monotonic() + max_seconds
     first_frame_deadline = time.monotonic() + initial_audio_timeout_seconds
     try:
@@ -185,6 +187,8 @@ def capture_utterance_from_fd3(
         chunks.append(pcm)
 
         if is_silence(pcm, silence_threshold_dbfs):
+            if not speech_started and time.monotonic() - started_at >= no_speech_timeout_seconds:
+                break
             if speech_started:
                 silence_ms += frame_ms
                 if silence_ms >= silence_timeout_ms:

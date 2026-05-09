@@ -137,6 +137,12 @@ def test_normal_english_transcript_is_not_ignored():
     assert reason is None
 
 
+def test_same_language_chinese_room_number_transcript_is_not_ignored():
+    ignored, reason = transcript_should_be_ignored("我的房間是一零零一。", "zh", 0.78, "zh")
+    assert ignored is False
+    assert reason is None
+
+
 def test_parse_model_transfer_args(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     client = OpenAIRealtimeClient()

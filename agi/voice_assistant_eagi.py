@@ -136,6 +136,14 @@ SERVICE_REQUEST_NOTED_PHRASES = {
     "id": "Terima kasih. Saya telah mencatat permintaan Anda, tetapi sistem permintaan hotel belum terhubung saat ini. Apakah ada hal lain yang bisa saya bantu?",
 }
 
+STILL_THERE_PHRASES = {
+    "en": "Are you still there? Please let me know how I can help.",
+    "zh": "请问您还在线吗？请告诉我有什么可以帮您。",
+    "zh-yue": "請問你仲喺度嗎？有咩需要可以話我知。",
+    "ms": "Adakah anda masih di talian? Sila beritahu saya bagaimana saya boleh membantu.",
+    "id": "Apakah Anda masih di sana? Silakan beri tahu saya bagaimana saya bisa membantu.",
+}
+
 
 DEFAULT_GREETING_TEXT = "Hello, this is the AI assistant. How can I help you today?"
 DEFAULT_PERSONAL_GREETING_TEXT = "Hello {caller_name}, my name is Nova, your personal AI Voicebot. How can I help you today?"
@@ -358,7 +366,14 @@ def transcript_should_be_ignored(
                 f"confidence={confidence:.2f} preferred={preferred_language}"
             )
 
-    if len(words) < min_words and len(text) <= short_chars and confidence < switch_threshold:
+    if (
+        detected_language == preferred_language
+        and preferred_language in {"zh", "zh-yue", "ja", "ko", "th", "ta", "hi", "ar"}
+        and FOREIGN_SCRIPT_PATTERN.search(text)
+    ):
+        return False, None
+
+    if detected_language != preferred_language and len(words) < min_words and len(text) <= short_chars and confidence < switch_threshold:
         return True, "short low-confidence transcript"
 
     return False, None
@@ -981,6 +996,7 @@ async def run_call() -> int:
     record_audio = os.getenv("RECORD_AUDIO", "false").lower() == "true"
     silence_timeout_ms = int(os.getenv("SILENCE_TIMEOUT_MS", "900"))
     max_utterance_seconds = int(os.getenv("MAX_UTTERANCE_SECONDS", "15"))
+    no_speech_timeout_seconds = float(os.getenv("NO_SPEECH_TIMEOUT_SECONDS", "5"))
     transfer_extension = os.getenv("TRANSFER_EXTENSION", os.getenv("HUMAN_TRANSFER_EXTENSION", "1920"))
     room_service_transfer_extension = os.getenv("ROOM_SERVICE_TRANSFER_EXTENSION", "1921")
     source_codec = os.getenv("ASTERISK_EAGI_CODEC", "slin")
@@ -988,6 +1004,8 @@ async def run_call() -> int:
     enable_ready_tone = os.getenv("ENABLE_READY_TONE", "false").lower() == "true"
     enable_ai_greeting = os.getenv("ENABLE_AI_GREETING", "true").lower() == "true"
     no_audio_max_turns = int(os.getenv("NO_AUDIO_MAX_TURNS", "20"))
+    silence_prompt_after_turns = int(os.getenv("SILENCE_PROMPT_AFTER_TURNS", "2"))
+    max_silence_prompts = int(os.getenv("MAX_SILENCE_PROMPTS", "2"))
     eagi_frame_bytes = int(source_rate * 20 / 1000) * (2 if source_codec.lower() in {"slin", "slin16", "pcm16"} else 1)
     drain_after_playback_ms = int(os.getenv("EAGI_DRAIN_AFTER_PLAYBACK_MS", "250"))
 
@@ -1043,6 +1061,8 @@ async def run_call() -> int:
             session.append_event("greeting_error", {"error": str(exc)})
 
     no_audio_turns = 0
+    ignored_audio_turns = 0
+    silence_prompt_count = 0
 
     for turn in range(1, 50):
         try:
@@ -1062,6 +1082,7 @@ async def run_call() -> int:
                 sample_rate=source_rate,
                 silence_timeout_ms=silence_timeout_ms,
                 max_seconds=max_utterance_seconds,
+                no_speech_timeout_seconds=no_speech_timeout_seconds,
             )
             ignore_audio, quality, audio_ignore_reason = audio_input_should_be_ignored(pcm, source_rate)
             session.append_event("audio_captured", {"turn": turn, "bytes": len(pcm), **quality})
@@ -1069,6 +1090,7 @@ async def run_call() -> int:
                 agi_verbose(f"AI assistant ignored short audio bytes={len(pcm)}", 1)
                 if len(pcm) == 0:
                     no_audio_turns += 1
+                    ignored_audio_turns += 1
                     session.append_event(
                         "no_eagi_audio",
                         {
@@ -1083,16 +1105,62 @@ async def run_call() -> int:
                         break
                     if no_audio_turns >= no_audio_max_turns:
                         break
+                    if ignored_audio_turns >= silence_prompt_after_turns and silence_prompt_count < max_silence_prompts:
+                        silence_prompt_count += 1
+                        ignored_audio_turns = 0
+                        phrase = STILL_THERE_PHRASES.get(session.preferred_language, STILL_THERE_PHRASES["en"])
+                        prompt_wav = await synthesize_cached_phrase(client, session, phrase, sounds_dir, "still_there")
+                        prompt_response = agi_stream_file(str(prompt_wav.with_suffix("")))
+                        session.append_event(
+                            "silence_prompt_played",
+                            {
+                                "turn": turn,
+                                "count": silence_prompt_count,
+                                "file": str(prompt_wav),
+                                "text": phrase,
+                                "agi_response": prompt_response,
+                            },
+                        )
+                        if agi_response_is_dead_channel(prompt_response):
+                            session.append_event("hangup", {"reason": "dead channel during silence prompt playback"})
+                            break
+                        drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+                        if drained:
+                            session.append_event("eagi_audio_drained", {"after": "silence_prompt", "turn": turn, "bytes": drained})
                     continue
                 continue
             if ignore_audio:
+                ignored_audio_turns += 1
                 agi_verbose(f"AI assistant ignored weak audio reason={audio_ignore_reason} bytes={len(pcm)}", 1)
                 session.append_event(
                     "audio_ignored",
                     {"turn": turn, "bytes": len(pcm), "reason": audio_ignore_reason, **quality},
                 )
+                if ignored_audio_turns >= silence_prompt_after_turns and silence_prompt_count < max_silence_prompts:
+                    silence_prompt_count += 1
+                    ignored_audio_turns = 0
+                    phrase = STILL_THERE_PHRASES.get(session.preferred_language, STILL_THERE_PHRASES["en"])
+                    prompt_wav = await synthesize_cached_phrase(client, session, phrase, sounds_dir, "still_there")
+                    prompt_response = agi_stream_file(str(prompt_wav.with_suffix("")))
+                    session.append_event(
+                        "silence_prompt_played",
+                        {
+                            "turn": turn,
+                            "count": silence_prompt_count,
+                            "file": str(prompt_wav),
+                            "text": phrase,
+                            "agi_response": prompt_response,
+                        },
+                    )
+                    if agi_response_is_dead_channel(prompt_response):
+                        session.append_event("hangup", {"reason": "dead channel during silence prompt playback"})
+                        break
+                    drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+                    if drained:
+                        session.append_event("eagi_audio_drained", {"after": "silence_prompt", "turn": turn, "bytes": drained})
                 continue
             no_audio_turns = 0
+            ignored_audio_turns = 0
 
             if record_audio:
                 write_wav(sounds_dir / f"{session.call_id}_{turn}_caller.wav", pcm, source_rate)
