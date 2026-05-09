@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -190,6 +191,69 @@ END_CALL_TOOL = {
         "additionalProperties": False,
     },
 }
+
+
+def build_prior_call_context(session: CallSession, max_dialogue_events: int = 12) -> str:
+    """Build compact memory for the fresh Realtime session used on each EAGI turn."""
+    dialogue: list[str] = []
+    known: dict[str, str] = {}
+    pending: dict[str, Any] = {}
+
+    for event in session.history:
+        event_type = event.get("type")
+        text = str(event.get("text") or "").strip()
+
+        if event_type == "user" and text:
+            dialogue.append(f"Guest: {text}")
+            room_match = re.search(r"\b(?:room|房间|房間|房号|房號)?\s*(\d{3,6})\b", text, re.IGNORECASE)
+            if room_match:
+                known["room_number"] = room_match.group(1)
+            chinese_room_digits = re.search(r"(?:房间|房間|房号|房號).{0,10}?(\d{3,6})", text)
+            if chinese_room_digits:
+                known["room_number"] = chinese_room_digits.group(1)
+            chinese_room_match = re.search(r"(?:房间|房間|房号|房號).{0,8}([一二三四五六七八九零〇两]{3,6})", text)
+            if chinese_room_match:
+                known["room_number_spoken"] = chinese_room_match.group(1)
+        elif event_type == "assistant" and text:
+            dialogue.append(f"Assistant: {text}")
+        elif event_type == "service_request_action_detected":
+            pending = {
+                "category": event.get("category"),
+                "summary": event.get("summary"),
+                "room_number": event.get("room_number"),
+                "preferred_time": event.get("preferred_time"),
+                "confirmed_with_guest": event.get("confirmed_with_guest"),
+            }
+            if event.get("room_number"):
+                known["room_number"] = str(event.get("room_number"))
+        elif event_type == "service_request_submitted":
+            request = event.get("payload", {}).get("request", {})
+            if request:
+                pending = {
+                    "submitted": "true",
+                    "category": request.get("category"),
+                    "summary": request.get("summary"),
+                    "room_number": request.get("room_number"),
+                    "preferred_time": request.get("preferred_time"),
+                }
+                if request.get("room_number"):
+                    known["room_number"] = str(request.get("room_number"))
+
+    lines = [
+        f"Current preferred language: {session.preferred_language}",
+        f"Caller ID: {session.caller_id}",
+    ]
+    if session.caller_name:
+        lines.append(f"Caller name: {session.caller_name}")
+    if known:
+        lines.append("Known details: " + json.dumps(known, ensure_ascii=False))
+    if pending:
+        lines.append("Current or latest service request: " + json.dumps(pending, ensure_ascii=False))
+    if dialogue:
+        lines.append("Recent meaningful dialogue:")
+        lines.extend(dialogue[-max_dialogue_events:])
+    lines.append("Use the known details above. Do not ask again for details already present unless the caller changes them.")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -383,10 +447,7 @@ class OpenAIRealtimeClient:
         await ws.send(json.dumps(payload))
 
         if session.history:
-            context = "\n".join(
-                f"{item.get('role', item.get('type', 'event'))}: {item.get('text', item.get('response', ''))}"
-                for item in session.history[-8:]
-            )
+            context = build_prior_call_context(session)
             await ws.send(
                 json.dumps(
                     {

@@ -64,6 +64,8 @@ TRANSFER_TRIGGER_PATTERNS = [
     r"\btalk to (a )?(person|human|agent|representative)\b",
     r"\bspeak to (a )?(person|human|agent|representative)\b",
     r"\breal person\b",
+    r"(转接|轉接|接去|连接|連接|打给|打給|叫|找|搵).{0,8}(前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|同事|工作人员|工作人員)",
+    r"(前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|工作人员|工作人員).{0,8}(转接|轉接|接听|接聽|帮我|幫我|可以吗|可以嗎)",
 ]
 
 ROOM_SERVICE_TRANSFER_PATTERNS = [
@@ -73,6 +75,7 @@ ROOM_SERVICE_TRANSFER_PATTERNS = [
     r"\btalk to (room service|in-room dining)\b",
     r"\broom service (agent|staff|team|person)\b",
     r"\bin-room dining (agent|staff|team|person)\b",
+    r"(转接|轉接|接去|连接|連接|打给|打給|找|搵).{0,8}(客房服务|客房服務|送餐|房餐|餐饮|餐飲)",
 ]
 
 URGENT_TRANSFER_PATTERNS = [
@@ -322,6 +325,13 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
     words_for_guard = re.findall(r"[a-zA-ZÀ-ÿ']+", normalized)
     cjk_chars = CJK_PATTERN.findall(text)
 
+    if re.search(
+        r"\b(speak|talk|use|continue|switch|change)\b.{0,30}\benglish\b"
+        r"|\bin english\b|\benglish please\b|\byou'?re still speaking (in )?(chinese|mandarin|cantonese)\b",
+        normalized,
+    ):
+        return "en", 0.96
+
     if normalized_plain in LOW_INFORMATION_UTTERANCES:
         return default, 0.2
     if len(cjk_chars) == 1 and len(normalized_plain) <= 1:
@@ -368,6 +378,34 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
 
     words = set(re.findall(r"[a-zA-ZÀ-ÿ']+", normalized))
     if words:
+        latin_only = not (
+            CJK_PATTERN.search(text)
+            or JAPANESE_KANA_PATTERN.search(text)
+            or HANGUL_PATTERN.search(text)
+            or ARABIC_PATTERN.search(text)
+            or any(pattern.search(text) for pattern in SCRIPT_PATTERNS.values())
+        )
+        english_context_words = {
+            "can",
+            "you",
+            "speak",
+            "english",
+            "order",
+            "arrange",
+            "wake",
+            "call",
+            "tomorrow",
+            "room",
+            "understand",
+            "still",
+            "speaking",
+            "need",
+            "yes",
+            "correct",
+        }
+        if default != "en" and latin_only and (len(words) >= 4 or len(words & english_context_words) >= 2):
+            return "en", 0.91
+
         scored = sorted(
             ((len(words & markers), code) for code, markers in LATIN_LANGUAGE_MARKERS.items()),
             reverse=True,

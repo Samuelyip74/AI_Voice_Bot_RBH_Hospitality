@@ -36,6 +36,12 @@ def test_hospitality_transfer_routes_to_concierge():
     assert action["transfer_type"] == "human"
 
 
+def test_chinese_front_desk_transfer_routes_to_concierge():
+    action = determine_transfer_action("你可以幫我轉接去前台嗎?")
+    assert action["extension"] == "1920"
+    assert action["transfer_type"] == "human"
+
+
 def test_room_service_request_does_not_transfer_by_default():
     action = determine_transfer_action("I want room service to my room")
     assert action is None
@@ -95,10 +101,34 @@ def test_model_human_transfer_allowed_for_front_desk_request():
     assert reason is None
 
 
+def test_model_human_transfer_allowed_for_chinese_front_desk_request():
+    allowed, reason = model_transfer_action_is_allowed(
+        "你可以幫我轉接去前台嗎?",
+        {"action": "transfer", "extension": "1920", "transfer_type": "human", "reason": "客人要求转接前台"},
+        "1920",
+        "1921",
+    )
+
+    assert allowed is True
+    assert reason is None
+
+
 def test_model_room_service_transfer_allowed_for_explicit_room_service_staff_request():
     allowed, reason = model_transfer_action_is_allowed(
         "Please connect me to room service.",
         {"action": "transfer", "extension": "1921", "transfer_type": "room_service", "reason": "room service staff"},
+        "1920",
+        "1921",
+    )
+
+    assert allowed is True
+    assert reason is None
+
+
+def test_model_room_service_transfer_allowed_for_chinese_room_service_staff_request():
+    allowed, reason = model_transfer_action_is_allowed(
+        "可以幫我轉接去客房服務嗎?",
+        {"action": "transfer", "extension": "1921", "transfer_type": "room_service", "reason": "客人要求转接客房服务"},
         "1920",
         "1921",
     )
@@ -236,11 +266,23 @@ def test_rainbow_blank_room_service_categories_still_defaults_to_room_service(mo
     assert jid == "room-service@conference.openrainbow.com"
 
 
-def test_rainbow_non_room_service_destination_uses_front_desk_bubble(monkeypatch):
+def test_rainbow_housekeeping_destination_uses_room_service_bubble(monkeypatch):
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_CATEGORIES", "room_service,housekeeping")
     monkeypatch.setenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "room-service@conference.openrainbow.com")
     monkeypatch.setenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "front-desk@conference.openrainbow.com")
 
     destination, jid = rainbow_service_request_destination({"category": "housekeeping"})
+
+    assert destination == "room_service"
+    assert jid == "room-service@conference.openrainbow.com"
+
+
+def test_rainbow_front_desk_category_uses_front_desk_bubble(monkeypatch):
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_CATEGORIES", "room_service,housekeeping")
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "room-service@conference.openrainbow.com")
+    monkeypatch.setenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "front-desk@conference.openrainbow.com")
+
+    destination, jid = rainbow_service_request_destination({"category": "front_desk", "summary": "Guest asks for manager"})
 
     assert destination == "front_desk"
     assert jid == "front-desk@conference.openrainbow.com"

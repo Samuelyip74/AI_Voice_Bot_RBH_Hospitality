@@ -497,14 +497,14 @@ RAINBOW_APP_ID=<rainbow_application_id>
 RAINBOW_APP_SECRET=<rainbow_application_secret>
 RAINBOW_FRONT_DESK_BUBBLE_JID=<front_desk_bubble_jid>
 RAINBOW_ROOM_SERVICE_BUBBLE_JID=<room_service_bubble_jid>
-RAINBOW_ROOM_SERVICE_CATEGORIES=room_service
+RAINBOW_ROOM_SERVICE_CATEGORIES=room_service,housekeeping
 RAINBOW_NODE_ASYNC=true
 RAINBOW_NODE_TIMEOUT_SECONDS=45
 RAINBOW_NODE_READY_TIMEOUT_MS=30000
 RAINBOW_NODE_STOP_TIMEOUT_MS=5000
 ```
 
-When a confirmed OpenAI `submit_hotel_request` action is received, the voicebot submits to `HOTEL_REQUEST_WEBHOOK_URL` and queues a Rainbow bubble message. With `RAINBOW_NODE_ASYNC=true`, Rainbow delivery does not block the live phone call; the call log first records `service_request_rainbow_queued`, then records `service_request_rainbow_result` if the notifier finishes while the EAGI process is still running. `room_service` requests go to `RAINBOW_ROOM_SERVICE_BUBBLE_JID`; all other categories go to `RAINBOW_FRONT_DESK_BUBBLE_JID` unless `RAINBOW_ROOM_SERVICE_CATEGORIES` is expanded.
+When a confirmed OpenAI `submit_hotel_request` action is received, the voicebot submits to `HOTEL_REQUEST_WEBHOOK_URL` and queues a Rainbow bubble message. With `RAINBOW_NODE_ASYNC=true`, Rainbow delivery does not block the live phone call; the call log first records `service_request_rainbow_queued`, then records `service_request_rainbow_result` if the notifier finishes while the EAGI process is still running. `room_service` and `housekeeping` requests go to `RAINBOW_ROOM_SERVICE_BUBBLE_JID`; all other categories go to `RAINBOW_FRONT_DESK_BUBBLE_JID` unless `RAINBOW_ROOM_SERVICE_CATEGORIES` is expanded.
 
 Check call logs for:
 

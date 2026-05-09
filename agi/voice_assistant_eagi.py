@@ -446,7 +446,15 @@ def model_transfer_action_is_allowed(
             r".*\b(1920|front desk|frontdesk|reception|receptionist|concierge|operator|human|agent|manager|person|staff)\b",
             normalized,
         )
-        if explicit_human:
+        explicit_human_zh = re.search(
+            r"(转接|轉接|接去|连接|連接|打给|打給|叫|找|搵).{0,12}"
+            r"(1920|前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|同事|工作人员|工作人員)"
+            r"|"
+            r"(1920|前台|前臺|接待|柜台|櫃台|礼宾|禮賓|经理|經理|真人|人工|同事|工作人员|工作人員).{0,12}"
+            r"(转接|轉接|接听|接聽|连接|連接|帮我|幫我|可以吗|可以嗎)",
+            normalized,
+        )
+        if explicit_human or explicit_human_zh:
             return True, None
         return False, "caller did not explicitly request a human/front-desk transfer"
 
@@ -456,7 +464,12 @@ def model_transfer_action_is_allowed(
             r".*\b(1921|room service|in-room dining|in room dining)\b",
             normalized,
         )
-        if explicit_room_service:
+        explicit_room_service_zh = re.search(
+            r"(转接|轉接|接去|连接|連接|打给|打給|找|搵).{0,12}"
+            r"(1921|客房服务|客房服務|送餐|房餐|餐饮|餐飲)",
+            normalized,
+        )
+        if explicit_room_service or explicit_room_service_zh:
             return True, None
         return False, "room-service request is not an explicit request to transfer to room-service staff"
 

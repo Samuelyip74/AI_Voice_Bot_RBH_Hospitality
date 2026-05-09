@@ -3,7 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agi"))
 
-from openai_realtime_client import ASSISTANT_INSTRUCTIONS
+from call_session import CallSession
+from openai_realtime_client import ASSISTANT_INSTRUCTIONS, build_prior_call_context
 
 
 def test_prompt_requires_context_intake():
@@ -38,3 +39,22 @@ def test_prompt_can_end_call_when_guest_is_done():
     assert "no more requests" in ASSISTANT_INSTRUCTIONS
     assert "end_call tool" in ASSISTANT_INSTRUCTIONS
     assert "Do not ask another follow-up question" in ASSISTANT_INSTRUCTIONS
+
+
+def test_prior_call_context_keeps_known_room_after_silence_events():
+    session = CallSession(call_id="ctx", caller_id="1000", preferred_language="zh")
+    session.history = [
+        {"type": "user", "role": "user", "text": "我的房间很肮脏，可以帮我清理吗？"},
+        {"type": "assistant", "role": "assistant", "text": "请问您的房间号是多少？"},
+        {"type": "user", "role": "user", "text": "我的房间号码是1001。"},
+        {"type": "audio_ignored", "reason": "audio rms below -46 dBFS"},
+        {"type": "silence_prompt_played", "text": "请问您还在线吗？"},
+        {"type": "user", "role": "user", "text": "现在就叫工作人员来清理我的房间，谢谢。"},
+    ]
+
+    context = build_prior_call_context(session)
+
+    assert "1001" in context
+    assert "Known details" in context
+    assert "audio_ignored" not in context
+    assert "silence_prompt_played" not in context

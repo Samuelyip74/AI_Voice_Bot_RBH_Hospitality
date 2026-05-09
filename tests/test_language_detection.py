@@ -173,3 +173,15 @@ def test_session_does_not_switch_language_below_threshold(monkeypatch):
 
 def test_language_response_instruction_for_mandarin():
     assert "Mandarin Chinese" in language_response_instruction("zh")
+
+
+def test_explicit_english_request_switches_from_chinese():
+    language, confidence = detect_language_from_text("Can you speak English?", "zh")
+    assert language == "en"
+    assert confidence >= 0.9
+
+
+def test_english_sentence_switches_back_from_chinese():
+    language, confidence = detect_language_from_text("I need a wake-up call tomorrow at 7 a.m.", "zh")
+    assert language == "en"
+    assert confidence >= 0.9
