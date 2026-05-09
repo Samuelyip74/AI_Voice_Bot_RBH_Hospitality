@@ -11,7 +11,10 @@ from audio_utils import (
     decode_telephony_audio,
     encode_telephony_audio,
     openai_input_pcm,
+    pcm_duration_seconds,
     read_wav_pcm16,
+    rms_dbfs,
+    speech_ratio,
 )
 
 
@@ -43,3 +46,14 @@ def test_asterisk_playback_wav(tmp_path):
     data, rate = read_wav_pcm16(wav)
     assert rate == 8000
     assert len(data) == 8000 * 2 // 4
+
+
+def test_audio_quality_metrics_distinguish_speech_from_silence():
+    speech = sine_pcm(rate=8000, seconds=1)
+    silence = b"\x00\x00" * 8000
+
+    assert pcm_duration_seconds(speech, 8000) == 1.0
+    assert rms_dbfs(speech) > -20
+    assert speech_ratio(speech, 8000) > 0.9
+    assert rms_dbfs(silence) == -120.0
+    assert speech_ratio(silence, 8000) == 0.0

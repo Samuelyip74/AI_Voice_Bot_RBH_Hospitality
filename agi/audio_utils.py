@@ -76,8 +76,63 @@ def rms_dbfs(pcm16: bytes) -> float:
     return 20.0 * math.log10(rms / 32768.0)
 
 
+def pcm_duration_seconds(pcm16: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE) -> float:
+    if sample_rate <= 0:
+        return 0.0
+    return len(pcm16) / (sample_rate * SAMPLE_WIDTH)
+
+
+def speech_ratio(pcm16: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE, frame_ms: int = 20, threshold_dbfs: float = -38.0) -> float:
+    frame_bytes = max(SAMPLE_WIDTH, int(sample_rate * frame_ms / 1000) * SAMPLE_WIDTH)
+    if not pcm16:
+        return 0.0
+    frames = 0
+    speech_frames = 0
+    for offset in range(0, len(pcm16), frame_bytes):
+        frame = pcm16[offset : offset + frame_bytes]
+        if len(frame) < frame_bytes:
+            continue
+        frames += 1
+        if not is_silence(frame, threshold_dbfs):
+            speech_frames += 1
+    return speech_frames / frames if frames else 0.0
+
+
 def is_silence(pcm16: bytes, threshold_dbfs: float = -42.0) -> bool:
     return rms_dbfs(pcm16) < threshold_dbfs
+
+
+def drain_audio_fd(fd: int = 3, frame_bytes: int = 320, drain_ms: int = 250) -> int:
+    """Discard already-buffered EAGI audio, usually after playback.
+
+    EAGI fd 3 can keep receiving inbound RTP while AGI is streaming a prompt.
+    Draining briefly prevents the next turn from transcribing prompt echo, line
+    comfort noise, or speech that happened during playback as fresh user input.
+    """
+    if drain_ms <= 0:
+        return 0
+    try:
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError):
+        pass
+
+    drained = 0
+    deadline = time.monotonic() + drain_ms / 1000.0
+    while time.monotonic() < deadline:
+        wait_seconds = max(0.0, min(0.02, deadline - time.monotonic()))
+        readable, _writable, _error = select.select([fd], [], [], wait_seconds)
+        if not readable:
+            continue
+        try:
+            frame = os.read(fd, frame_bytes)
+        except BlockingIOError:
+            continue
+        except OSError:
+            break
+        if not frame:
+            break
+        drained += len(frame)
+    return drained
 
 
 def capture_utterance_from_fd3(

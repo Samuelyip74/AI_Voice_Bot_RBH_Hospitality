@@ -14,6 +14,8 @@ import time
 import traceback
 import json
 import smtplib
+import subprocess
+import threading
 from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -22,7 +24,16 @@ from urllib.parse import unquote
 
 from dotenv import load_dotenv
 
-from audio_utils import asterisk_playback_wav, capture_utterance_from_fd3, openai_input_pcm, write_wav
+from audio_utils import (
+    asterisk_playback_wav,
+    capture_utterance_from_fd3,
+    drain_audio_fd,
+    openai_input_pcm,
+    pcm_duration_seconds,
+    rms_dbfs,
+    speech_ratio,
+    write_wav,
+)
 from call_session import (
     CallSession,
     detect_language_from_text,
@@ -109,9 +120,28 @@ CLOSING_PHRASES = {
     "id": "Sama-sama. Terima kasih telah menghubungi kami, semoga hari Anda menyenangkan.",
 }
 
+SERVICE_REQUEST_SUBMITTED_PHRASES = {
+    "en": "Thank you. I have submitted your request to our hotel team. Is there anything else I can help with?",
+    "zh": "谢谢。我已经把您的请求提交给酒店团队。还有其他可以帮您的吗？",
+    "zh-yue": "多謝。我已經幫你將要求提交俾酒店團隊。仲有冇其他可以幫你？",
+    "ms": "Terima kasih. Saya telah menghantar permintaan anda kepada pasukan hotel. Ada apa-apa lagi yang boleh saya bantu?",
+    "id": "Terima kasih. Saya telah mengirim permintaan Anda kepada tim hotel. Apakah ada hal lain yang bisa saya bantu?",
+}
+
+SERVICE_REQUEST_NOTED_PHRASES = {
+    "en": "Thank you. I have noted your request, but the hotel request system is not connected right now. Is there anything else I can help with?",
+    "zh": "谢谢。我已经记录您的请求，不过酒店请求系统目前未连接。还有其他可以帮您的吗？",
+    "zh-yue": "多謝。我已經記低你嘅要求，不過酒店系統而家未連接。仲有冇其他可以幫你？",
+    "ms": "Terima kasih. Saya telah mencatat permintaan anda, tetapi sistem permintaan hotel belum bersambung sekarang. Ada apa-apa lagi yang boleh saya bantu?",
+    "id": "Terima kasih. Saya telah mencatat permintaan Anda, tetapi sistem permintaan hotel belum terhubung saat ini. Apakah ada hal lain yang bisa saya bantu?",
+}
+
 
 DEFAULT_GREETING_TEXT = "Hello, this is the AI assistant. How can I help you today?"
 DEFAULT_PERSONAL_GREETING_TEXT = "Hello {caller_name}, my name is Nova, your personal AI Voicebot. How can I help you today?"
+FOREIGN_SCRIPT_PATTERN = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\u0600-\u06ff\u0900-\u097f\u0b80-\u0bff\u0e00-\u0e7f]"
+)
 
 
 def parse_agi_env(stdin: object = sys.stdin) -> dict[str, str]:
@@ -276,6 +306,64 @@ def build_greeting_text(session: CallSession) -> tuple[str, bool]:
     return os.getenv("AI_GREETING_TEXT", DEFAULT_GREETING_TEXT), False
 
 
+def audio_input_quality(pcm: bytes, sample_rate: int) -> dict[str, float]:
+    return {
+        "duration_seconds": round(pcm_duration_seconds(pcm, sample_rate), 3),
+        "rms_dbfs": round(rms_dbfs(pcm), 1),
+        "speech_ratio": round(
+            speech_ratio(
+                pcm,
+                sample_rate,
+                threshold_dbfs=float(os.getenv("AUDIO_SPEECH_THRESHOLD_DBFS", "-38")),
+            ),
+            3,
+        ),
+    }
+
+
+def audio_input_should_be_ignored(pcm: bytes, sample_rate: int) -> tuple[bool, dict[str, float], str | None]:
+    quality = audio_input_quality(pcm, sample_rate)
+    min_seconds = float(os.getenv("MIN_AUDIO_SECONDS", "0.75"))
+    min_rms = float(os.getenv("MIN_AUDIO_RMS_DBFS", "-46"))
+    min_speech_ratio = float(os.getenv("MIN_AUDIO_SPEECH_RATIO", "0.08"))
+
+    if quality["duration_seconds"] < min_seconds:
+        return True, quality, f"audio shorter than {min_seconds:g}s"
+    if quality["rms_dbfs"] < min_rms:
+        return True, quality, f"audio rms below {min_rms:g} dBFS"
+    if quality["speech_ratio"] < min_speech_ratio:
+        return True, quality, f"speech ratio below {min_speech_ratio:g}"
+    return False, quality, None
+
+
+def transcript_should_be_ignored(
+    transcript: str,
+    detected_language: str,
+    confidence: float,
+    preferred_language: str,
+) -> tuple[bool, str | None]:
+    text = (transcript or "").strip()
+    if not text:
+        return True, "empty transcript"
+
+    min_words = int(os.getenv("MIN_TRANSCRIPT_WORDS", "2"))
+    switch_threshold = float(os.getenv("LANGUAGE_SWITCH_CONFIDENCE", "0.90"))
+    short_chars = int(os.getenv("LOW_CONFIDENCE_TRANSCRIPT_MAX_CHARS", "16"))
+    words = re.findall(r"[\w']+", text, flags=re.UNICODE)
+
+    if detected_language != preferred_language and confidence < switch_threshold:
+        if FOREIGN_SCRIPT_PATTERN.search(text) or len(text) <= short_chars or len(words) < min_words:
+            return True, (
+                f"low-confidence foreign transcript language={detected_language} "
+                f"confidence={confidence:.2f} preferred={preferred_language}"
+            )
+
+    if len(words) < min_words and len(text) <= short_chars and confidence < switch_threshold:
+        return True, "short low-confidence transcript"
+
+    return False, None
+
+
 def normalize_transfer_extension(extension: str, transfer_type: str, human_extension: str, room_service_extension: str) -> str:
     value = (extension or "").strip().lower().replace("-", "_").replace(" ", "_")
     room_service_aliases = {"1921", "room_service", "in_room_dining", "in-room_dining", "dining", "restaurant"}
@@ -301,10 +389,77 @@ def normalize_transfer_extension(extension: str, transfer_type: str, human_exten
     return extension if extension.isdigit() else human_extension
 
 
-def post_hotel_request(session: CallSession, payload: dict) -> dict:
-    webhook_url = os.getenv("HOTEL_REQUEST_WEBHOOK_URL", "").strip()
-    token = os.getenv("HOTEL_REQUEST_WEBHOOK_TOKEN", "").strip()
-    body = {
+def model_transfer_action_is_allowed(
+    transcript: str,
+    action: dict | None,
+    human_extension: str,
+    room_service_extension: str,
+) -> tuple[bool, str | None]:
+    """Only honor model transfer tool calls when the caller explicitly asked for transfer.
+
+    The Realtime model can occasionally emit a transfer tool call while also asking a
+    normal service-intake question. This guard keeps routine hotel service requests in
+    the collection/confirmation flow unless the caller clearly requested a live team,
+    a room-service team, a direct room transfer, or emergency escalation.
+    """
+    if not action:
+        return False, "missing transfer action"
+
+    normalized = transcript.lower()
+    raw_extension = str(action.get("extension", "")).strip()
+    transfer_type = (action.get("transfer_type") or "").strip().lower()
+    target_extension = normalize_transfer_extension(raw_extension, transfer_type, human_extension, room_service_extension)
+    effective_type = transfer_type or (
+        "room_service"
+        if target_extension == room_service_extension
+        else "room"
+        if target_extension.isdigit() and target_extension not in {str(human_extension), str(room_service_extension)}
+        else "human"
+    )
+
+    deterministic = determine_transfer_action(
+        transcript,
+        human_extension=human_extension,
+        room_service_extension=room_service_extension,
+    )
+    if deterministic and deterministic.get("transfer_type") == effective_type:
+        return True, None
+
+    if effective_type == "human":
+        explicit_human = re.search(
+            r"\b(transfer|connect|call|dial|reach|speak|talk|put me through|route)\b"
+            r".*\b(1920|front desk|frontdesk|reception|receptionist|concierge|operator|human|agent|manager|person|staff)\b",
+            normalized,
+        )
+        if explicit_human:
+            return True, None
+        return False, "caller did not explicitly request a human/front-desk transfer"
+
+    if effective_type == "room_service":
+        explicit_room_service = re.search(
+            r"\b(transfer|connect|call|dial|reach|speak|talk|put me through|route)\b"
+            r".*\b(1921|room service|in-room dining|in room dining)\b",
+            normalized,
+        )
+        if explicit_room_service:
+            return True, None
+        return False, "room-service request is not an explicit request to transfer to room-service staff"
+
+    if effective_type == "room":
+        escaped_extension = re.escape(target_extension)
+        explicit_room = re.search(
+            rf"\b(transfer|connect|call|dial|reach|put me through|route)\b.*\b(room\s*)?{escaped_extension}\b",
+            normalized,
+        )
+        if explicit_room:
+            return True, None
+        return False, "caller did not explicitly request a direct room transfer"
+
+    return False, f"unknown transfer type {effective_type!r}"
+
+
+def build_hotel_request_body(session: CallSession, payload: dict) -> dict:
+    return {
         "call_id": session.call_id,
         "caller_id": session.caller_id,
         "caller_name": session.caller_name,
@@ -313,6 +468,12 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
         "request": payload,
         "submitted_at": time.time(),
     }
+
+
+def post_hotel_request(session: CallSession, payload: dict) -> dict:
+    webhook_url = os.getenv("HOTEL_REQUEST_WEBHOOK_URL", "").strip()
+    token = os.getenv("HOTEL_REQUEST_WEBHOOK_TOKEN", "").strip()
+    body = build_hotel_request_body(session, payload)
     if not webhook_url:
         return {"sent": False, "reason": "HOTEL_REQUEST_WEBHOOK_URL is not configured", "payload": body}
 
@@ -329,6 +490,124 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
             "response": response_body,
             "payload": body,
         }
+
+
+def rainbow_service_request_destination(payload: dict) -> tuple[str, str]:
+    category = (payload.get("category") or "").strip().lower()
+    room_service_categories = {
+        item.strip().lower()
+        for item in os.getenv("RAINBOW_ROOM_SERVICE_CATEGORIES", "room_service").split(",")
+        if item.strip()
+    }
+    if category in room_service_categories:
+        return "room_service", os.getenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "").strip()
+    return "front_desk", os.getenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "").strip()
+
+
+def notify_rainbow_service_request(session: CallSession, payload: dict) -> dict:
+    enabled = os.getenv("RAINBOW_NODE_NOTIFICATIONS_ENABLED", "true").lower() == "true"
+    destination, bubble_jid = rainbow_service_request_destination(payload)
+    body = build_hotel_request_body(session, payload)
+    body["rainbow_destination"] = destination
+
+    if not enabled:
+        return {"sent": False, "reason": "RAINBOW_NODE_NOTIFICATIONS_ENABLED is false", "destination": destination, "payload": body}
+    if not bubble_jid:
+        env_name = "RAINBOW_ROOM_SERVICE_BUBBLE_JID" if destination == "room_service" else "RAINBOW_FRONT_DESK_BUBBLE_JID"
+        return {"sent": False, "reason": f"{env_name} is not configured", "destination": destination, "payload": body}
+
+    required_env = ["RAINBOW_LOGIN", "RAINBOW_PASSWORD", "RAINBOW_APP_ID", "RAINBOW_APP_SECRET"]
+    missing = [name for name in required_env if not os.getenv(name, "").strip()]
+    if missing:
+        return {"sent": False, "reason": f"Missing Rainbow SDK env vars: {', '.join(missing)}", "destination": destination, "payload": body}
+
+    script = Path(os.getenv("RAINBOW_NODE_NOTIFIER_SCRIPT", Path(__file__).with_name("rainbow_service_request_notifier.js"))).resolve()
+    if not script.exists():
+        return {"sent": False, "reason": f"Rainbow notifier script not found: {script}", "destination": destination, "payload": body}
+
+    command = [os.getenv("RAINBOW_NODE_BIN", "node"), str(script)]
+    node_payload = dict(body)
+    node_payload["bubble_jid"] = bubble_jid
+    node_payload["destination"] = destination
+    timeout = float(os.getenv("RAINBOW_NODE_TIMEOUT_SECONDS", "45"))
+
+    try:
+        completed = subprocess.run(
+            command,
+            input=json.dumps(node_payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return {"sent": False, "reason": str(exc), "destination": destination, "payload": body}
+    except subprocess.TimeoutExpired:
+        return {"sent": False, "reason": f"Rainbow notifier timed out after {timeout:g}s", "destination": destination, "payload": body}
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    result = {
+        "sent": completed.returncode == 0,
+        "destination": destination,
+        "bubble_jid": bubble_jid,
+        "returncode": completed.returncode,
+        "stdout": stdout[-4096:],
+        "stderr": stderr[-4096:],
+        "payload": body,
+    }
+    if completed.returncode != 0 and not stdout and stderr:
+        result["reason"] = stderr.splitlines()[-1]
+    return result
+
+
+def append_rainbow_service_request_result(session: CallSession, payload: dict) -> None:
+    try:
+        result = notify_rainbow_service_request(session, payload)
+    except Exception as exc:
+        destination, _bubble_jid = rainbow_service_request_destination(payload)
+        result = {
+            "sent": False,
+            "reason": str(exc),
+            "destination": destination,
+            "payload": build_hotel_request_body(session, payload),
+        }
+    session.append_event("service_request_rainbow_result", result)
+
+
+async def submit_service_request_notifications(session: CallSession, payload: dict) -> tuple[dict, dict]:
+    try:
+        webhook_result = await asyncio.to_thread(post_hotel_request, session, payload)
+    except Exception as exc:
+        webhook_result = {"sent": False, "reason": str(exc), "payload": build_hotel_request_body(session, payload)}
+
+    if os.getenv("RAINBOW_NODE_ASYNC", "true").lower() == "true":
+        destination, bubble_jid = rainbow_service_request_destination(payload)
+        threading.Thread(
+            target=append_rainbow_service_request_result,
+            args=(session, payload),
+            daemon=True,
+            name=f"rainbow-notifier-{session.call_id}",
+        ).start()
+        return webhook_result, {
+            "queued": True,
+            "sent": False,
+            "destination": destination,
+            "bubble_jid": bubble_jid,
+            "reason": "Rainbow notification queued asynchronously",
+            "payload": build_hotel_request_body(session, payload),
+        }
+
+    try:
+        rainbow_result = await asyncio.to_thread(notify_rainbow_service_request, session, payload)
+    except Exception as exc:
+        destination, _bubble_jid = rainbow_service_request_destination(payload)
+        rainbow_result = {
+            "sent": False,
+            "reason": str(exc),
+            "destination": destination,
+            "payload": build_hotel_request_body(session, payload),
+        }
+    return webhook_result, rainbow_result
 
 
 def transcript_text(session: CallSession) -> str:
@@ -352,6 +631,8 @@ def transcript_text(session: CallSession) -> str:
             lines.append(f"[Transfer result: {event.get('target')} {event.get('status')} {event.get('status_protocol')}]")
         elif event_type == "service_request_submitted":
             lines.append(f"[Service request submitted: sent={event.get('sent')} status={event.get('status', '')}]")
+        elif event_type == "service_request_rainbow_result":
+            lines.append(f"[Rainbow notification: sent={event.get('sent')} destination={event.get('destination', '')}]")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -496,6 +777,15 @@ def finalize_transcript_email(session: CallSession) -> None:
         session.append_event("transcript_email_error", {"error": str(exc)})
 
 
+def append_service_request_email_result(session: CallSession, action: dict, submission: dict) -> None:
+    try:
+        service_email_result = send_service_request_email(session, action, submission)
+        session.append_event("service_request_email_result", service_email_result)
+    except Exception as exc:
+        LOGGER.exception("Could not send service request email")
+        session.append_event("service_request_email_error", {"error": str(exc)})
+
+
 def handle_shutdown_signal(signum: int, _frame: object) -> None:
     if CURRENT_SESSION is not None:
         CURRENT_SESSION.append_event("hangup_signal", {"signal": signum})
@@ -620,6 +910,30 @@ async def synthesize_cached_greeting(
     return generated_wav
 
 
+async def synthesize_cached_phrase(
+    client: OpenAIRealtimeClient,
+    session: CallSession,
+    text: str,
+    sounds_dir: Path,
+    prefix: str,
+) -> Path:
+    cache_enabled = os.getenv("AI_PHRASE_CACHE", "true").lower() == "true"
+    cache_version = os.getenv("AI_PHRASE_CACHE_VERSION", "1")
+    cache_key_source = f"{cache_version}|{client.model}|{session.preferred_language}|{text}"
+    cache_key = hashlib.sha256(cache_key_source.encode("utf-8")).hexdigest()[:16]
+    cached_wav = sounds_dir / f"{prefix}_{cache_key}.wav"
+
+    if cache_enabled and cached_wav.exists() and cached_wav.stat().st_size > 44:
+        session.append_event("phrase_cache_hit", {"file": str(cached_wav), "prefix": prefix, "text": text})
+        return cached_wav
+
+    target_wav = cached_wav if cache_enabled else sounds_dir / f"{session.call_id}_{prefix}.wav"
+    generated_wav = await synthesize_text_phrase(client, session, text, target_wav)
+    if cache_enabled:
+        session.append_event("phrase_cache_created", {"file": str(generated_wav), "prefix": prefix, "text": text})
+    return generated_wav
+
+
 async def synthesize_transfer_phrase(client: OpenAIRealtimeClient, session: CallSession, text: str, sounds_dir: Path, turn: int) -> Path:
     return await synthesize_text_phrase(client, session, text, sounds_dir / f"{session.call_id}_{turn}_transfer.wav")
 
@@ -642,6 +956,8 @@ async def run_call() -> int:
     enable_ready_tone = os.getenv("ENABLE_READY_TONE", "false").lower() == "true"
     enable_ai_greeting = os.getenv("ENABLE_AI_GREETING", "true").lower() == "true"
     no_audio_max_turns = int(os.getenv("NO_AUDIO_MAX_TURNS", "20"))
+    eagi_frame_bytes = int(source_rate * 20 / 1000) * (2 if source_codec.lower() in {"slin", "slin16", "pcm16"} else 1)
+    drain_after_playback_ms = int(os.getenv("EAGI_DRAIN_AFTER_PLAYBACK_MS", "250"))
 
     agi_verbose(f"AI assistant call started id={session.call_id}", 1)
     agi_answer()
@@ -687,6 +1003,9 @@ async def run_call() -> int:
                     "agi_response": greeting_response,
                 },
             )
+            drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+            if drained:
+                session.append_event("eagi_audio_drained", {"after": "greeting", "bytes": drained})
         except Exception as exc:
             LOGGER.exception("Could not synthesize or play AI greeting")
             session.append_event("greeting_error", {"error": str(exc)})
@@ -712,7 +1031,8 @@ async def run_call() -> int:
                 silence_timeout_ms=silence_timeout_ms,
                 max_seconds=max_utterance_seconds,
             )
-            session.append_event("audio_captured", {"turn": turn, "bytes": len(pcm)})
+            ignore_audio, quality, audio_ignore_reason = audio_input_should_be_ignored(pcm, source_rate)
+            session.append_event("audio_captured", {"turn": turn, "bytes": len(pcm), **quality})
             if len(pcm) < source_rate * 2 * 0.25:
                 agi_verbose(f"AI assistant ignored short audio bytes={len(pcm)}", 1)
                 if len(pcm) == 0:
@@ -733,6 +1053,13 @@ async def run_call() -> int:
                         break
                     continue
                 continue
+            if ignore_audio:
+                agi_verbose(f"AI assistant ignored weak audio reason={audio_ignore_reason} bytes={len(pcm)}", 1)
+                session.append_event(
+                    "audio_ignored",
+                    {"turn": turn, "bytes": len(pcm), "reason": audio_ignore_reason, **quality},
+                )
+                continue
             no_audio_turns = 0
 
             if record_audio:
@@ -742,6 +1069,25 @@ async def run_call() -> int:
             pcm24k = openai_input_pcm(pcm, source_rate)
             result = await client.process_turn(session, pcm24k)
             language, confidence = detect_language_from_text(result.transcript, session.preferred_language)
+            ignore_transcript, transcript_ignore_reason = transcript_should_be_ignored(
+                result.transcript,
+                language,
+                confidence,
+                session.preferred_language,
+            )
+            if ignore_transcript:
+                session.append_event(
+                    "transcript_ignored",
+                    {
+                        "turn": turn,
+                        "text": result.transcript,
+                        "detected_language": language,
+                        "confidence": confidence,
+                        "preferred_language": session.preferred_language,
+                        "reason": transcript_ignore_reason,
+                    },
+                )
+                continue
             session.update_language(language, confidence, source="post_response_transcript")
             session.append_event("user", {"role": "user", "text": result.transcript, "language": session.preferred_language})
             session.append_event("assistant", {"role": "assistant", "text": result.response_text})
@@ -768,30 +1114,47 @@ async def run_call() -> int:
             target_extension = transfer_extension
             transfer_type = "human"
             if result.transfer_action:
-                transfer = True
-                reason = result.transfer_action.get("reason", "model requested transfer")
-                target_extension = result.transfer_action.get("extension", transfer_extension)
-                transfer_type = result.transfer_action.get("transfer_type") or (
-                    "room_service"
-                    if target_extension == room_service_transfer_extension
-                    else "room"
-                    if str(target_extension).isdigit() and str(target_extension) not in {str(transfer_extension), str(room_service_transfer_extension)}
-                    else "human"
-                )
-                target_extension = normalize_transfer_extension(
-                    target_extension,
-                    transfer_type,
+                allowed, suppressed_reason = model_transfer_action_is_allowed(
+                    result.transcript,
+                    result.transfer_action,
                     transfer_extension,
                     room_service_transfer_extension,
                 )
-                session.append_event(
-                    "transfer_action_detected",
-                    {
-                        "extension": target_extension,
-                        "transfer_type": transfer_type,
-                        "reason": reason,
-                    },
-                )
+                if not allowed:
+                    session.append_event(
+                        "transfer_action_suppressed",
+                        {
+                            "reason": suppressed_reason,
+                            "model_action": result.transfer_action,
+                            "transcript": result.transcript,
+                        },
+                    )
+                    result.transfer_action = None
+                else:
+                    transfer = True
+                    reason = result.transfer_action.get("reason", "model requested transfer")
+                    target_extension = result.transfer_action.get("extension", transfer_extension)
+                    transfer_type = result.transfer_action.get("transfer_type") or (
+                        "room_service"
+                        if target_extension == room_service_transfer_extension
+                        else "room"
+                        if str(target_extension).isdigit() and str(target_extension) not in {str(transfer_extension), str(room_service_transfer_extension)}
+                        else "human"
+                    )
+                    target_extension = normalize_transfer_extension(
+                        target_extension,
+                        transfer_type,
+                        transfer_extension,
+                        room_service_transfer_extension,
+                    )
+                    session.append_event(
+                        "transfer_action_detected",
+                        {
+                            "extension": target_extension,
+                            "transfer_type": transfer_type,
+                            "reason": reason,
+                        },
+                    )
             if result.service_request_action:
                 session.append_event("service_request_action_detected", result.service_request_action)
             if result.end_call_action:
@@ -804,6 +1167,9 @@ async def run_call() -> int:
                 if agi_response_is_dead_channel(playback_response):
                     session.append_event("hangup", {"reason": "dead channel during assistant playback"})
                     break
+                drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+                if drained:
+                    session.append_event("eagi_audio_drained", {"after": "assistant_playback", "turn": turn, "bytes": drained})
                 time.sleep(0.25)
             else:
                 session.append_event("assistant_audio_missing", {"turn": turn, "text": result.response_text})
@@ -837,26 +1203,52 @@ async def run_call() -> int:
                         )
                     continue
                 try:
-                    submission = post_hotel_request(session, result.service_request_action)
+                    submission, rainbow_submission = await submit_service_request_notifications(session, result.service_request_action)
                     session.append_event("service_request_submitted", submission)
-                    try:
-                        service_email_result = send_service_request_email(session, result.service_request_action, submission)
-                        session.append_event("service_request_email_result", service_email_result)
-                    except Exception as exc:
-                        LOGGER.exception("Could not send service request email")
-                        session.append_event("service_request_email_error", {"error": str(exc)})
+                    if rainbow_submission.get("queued"):
+                        session.append_event("service_request_rainbow_queued", rainbow_submission)
+                    else:
+                        session.append_event("service_request_rainbow_result", rainbow_submission)
                     if not result.response_audio_pcm24k:
                         if submission.get("sent"):
-                            confirmation = "Thank you. I have submitted your request to our hotel team."
+                            confirmation = SERVICE_REQUEST_SUBMITTED_PHRASES.get(
+                                session.preferred_language,
+                                SERVICE_REQUEST_SUBMITTED_PHRASES["en"],
+                            )
                         else:
-                            confirmation = "Thank you. I have noted the request details, but the hotel request system is not connected right now."
-                        confirmation_wav = await synthesize_text_phrase(
+                            confirmation = SERVICE_REQUEST_NOTED_PHRASES.get(
+                                session.preferred_language,
+                                SERVICE_REQUEST_NOTED_PHRASES["en"],
+                            )
+                        confirmation_wav = await synthesize_cached_phrase(
                             client,
                             session,
                             confirmation,
-                            sounds_dir / f"{session.call_id}_{turn}_request_confirmation.wav",
+                            sounds_dir,
+                            "request_submitted",
                         )
-                        agi_stream_file(str(confirmation_wav.with_suffix("")))
+                        confirmation_response = agi_stream_file(str(confirmation_wav.with_suffix("")))
+                        session.append_event(
+                            "service_request_submission_prompt_played",
+                            {
+                                "turn": turn,
+                                "file": str(confirmation_wav),
+                                "text": confirmation,
+                                "agi_response": confirmation_response,
+                            },
+                        )
+                        if agi_response_is_dead_channel(confirmation_response):
+                            session.append_event("hangup", {"reason": "dead channel during service request confirmation playback"})
+                            break
+                        drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+                        if drained:
+                            session.append_event("eagi_audio_drained", {"after": "service_request_confirmation", "turn": turn, "bytes": drained})
+                    threading.Thread(
+                        target=append_service_request_email_result,
+                        args=(session, result.service_request_action, submission),
+                        daemon=True,
+                        name=f"service-email-{session.call_id}",
+                    ).start()
                 except Exception as exc:
                     LOGGER.exception("Could not submit hotel request")
                     session.append_event("service_request_error", {"error": str(exc), "payload": result.service_request_action})
