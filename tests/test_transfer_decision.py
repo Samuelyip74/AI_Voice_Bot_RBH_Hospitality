@@ -207,6 +207,29 @@ def test_rainbow_room_service_destination_uses_room_service_bubble(monkeypatch):
     assert jid == "room-service@conference.openrainbow.com"
 
 
+def test_rainbow_food_summary_uses_room_service_even_if_category_is_generic(monkeypatch):
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "room-service@conference.openrainbow.com")
+    monkeypatch.setenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "front-desk@conference.openrainbow.com")
+
+    destination, jid = rainbow_service_request_destination(
+        {"category": "general", "summary": "Order for Prawn Aglio Olio for room 1001"}
+    )
+
+    assert destination == "room_service"
+    assert jid == "room-service@conference.openrainbow.com"
+
+
+def test_rainbow_blank_room_service_categories_still_defaults_to_room_service(monkeypatch):
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_CATEGORIES", "")
+    monkeypatch.setenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "room-service@conference.openrainbow.com")
+    monkeypatch.setenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "front-desk@conference.openrainbow.com")
+
+    destination, jid = rainbow_service_request_destination({"category": "room_service", "summary": "Tea"})
+
+    assert destination == "room_service"
+    assert jid == "room-service@conference.openrainbow.com"
+
+
 def test_rainbow_non_room_service_destination_uses_front_desk_bubble(monkeypatch):
     monkeypatch.setenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "room-service@conference.openrainbow.com")
     monkeypatch.setenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "front-desk@conference.openrainbow.com")

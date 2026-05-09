@@ -118,6 +118,13 @@ async function main() {
   const ready = waitForReady(sdk, readyTimeoutMs);
 
   let started = false;
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, encoding, callback) => {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    process.stderr.write(text, encoding);
+    if (typeof callback === "function") callback();
+    return true;
+  };
   try {
     await sdk.start();
     started = true;
@@ -126,8 +133,10 @@ async function main() {
     const message = formatMessage(payload);
     const sent = await sdk.im.sendMessageToBubbleJid(message, bubbleJid);
 
+    process.stdout.write = originalStdoutWrite;
     process.stdout.write(JSON.stringify({ sent: true, destination: payload.destination, bubble_jid: bubbleJid, message_id: sent && sent.id ? sent.id : null }));
   } finally {
+    process.stdout.write = originalStdoutWrite;
     if (started) {
       const stopTimeoutMs = Number(process.env.RAINBOW_NODE_STOP_TIMEOUT_MS || 5000);
       await stopWithTimeout(sdk, stopTimeoutMs);

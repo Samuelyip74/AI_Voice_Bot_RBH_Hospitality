@@ -494,12 +494,26 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
 
 def rainbow_service_request_destination(payload: dict) -> tuple[str, str]:
     category = (payload.get("category") or "").strip().lower()
+    summary = (payload.get("summary") or "").strip().lower()
+    notes = (payload.get("notes") or "").strip().lower()
     room_service_categories = {
         item.strip().lower()
         for item in os.getenv("RAINBOW_ROOM_SERVICE_CATEGORIES", "room_service").split(",")
         if item.strip()
     }
-    if category in room_service_categories:
+    if not room_service_categories:
+        room_service_categories = {"room_service"}
+
+    room_service_keywords = {
+        item.strip().lower()
+        for item in os.getenv(
+            "RAINBOW_ROOM_SERVICE_KEYWORDS",
+            "room service,in-room dining,in room dining,food,meal,breakfast,lunch,dinner,order,prawn,aglio,olio",
+        ).split(",")
+        if item.strip()
+    }
+
+    if category in room_service_categories or any(keyword in f"{summary} {notes}" for keyword in room_service_keywords):
         return "room_service", os.getenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "").strip()
     return "front_desk", os.getenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "").strip()
 
@@ -546,12 +560,30 @@ def notify_rainbow_service_request(session: CallSession, payload: dict) -> dict:
         return {"sent": False, "reason": f"Rainbow notifier timed out after {timeout:g}s", "destination": destination, "payload": body}
     stdout = completed.stdout.strip()
     stderr = completed.stderr.strip()
+    stdout_lines = [line for line in stdout.splitlines() if line.strip()]
+    parsed_stdout: dict[str, object] = {}
+    sdk_log_lines = stdout_lines
+    for index in range(len(stdout_lines) - 1, -1, -1):
+        candidate = stdout_lines[index].strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_stdout = parsed
+            sdk_log_lines = stdout_lines[:index] + stdout_lines[index + 1 :]
+            break
+
     result = {
-        "sent": completed.returncode == 0,
+        "sent": bool(parsed_stdout.get("sent", completed.returncode == 0)),
         "destination": destination,
         "bubble_jid": bubble_jid,
+        "message_id": parsed_stdout.get("message_id"),
         "returncode": completed.returncode,
-        "stdout": stdout[-4096:],
+        "stdout": json.dumps(parsed_stdout, ensure_ascii=False) if parsed_stdout else stdout[-4096:],
+        "sdk_log": "\n".join(sdk_log_lines)[-4096:],
         "stderr": stderr[-4096:],
         "payload": body,
     }
@@ -1209,40 +1241,39 @@ async def run_call() -> int:
                         session.append_event("service_request_rainbow_queued", rainbow_submission)
                     else:
                         session.append_event("service_request_rainbow_result", rainbow_submission)
-                    if not result.response_audio_pcm24k:
-                        if submission.get("sent"):
-                            confirmation = SERVICE_REQUEST_SUBMITTED_PHRASES.get(
-                                session.preferred_language,
-                                SERVICE_REQUEST_SUBMITTED_PHRASES["en"],
-                            )
-                        else:
-                            confirmation = SERVICE_REQUEST_NOTED_PHRASES.get(
-                                session.preferred_language,
-                                SERVICE_REQUEST_NOTED_PHRASES["en"],
-                            )
-                        confirmation_wav = await synthesize_cached_phrase(
-                            client,
-                            session,
-                            confirmation,
-                            sounds_dir,
-                            "request_submitted",
+                    if submission.get("sent"):
+                        confirmation = SERVICE_REQUEST_SUBMITTED_PHRASES.get(
+                            session.preferred_language,
+                            SERVICE_REQUEST_SUBMITTED_PHRASES["en"],
                         )
-                        confirmation_response = agi_stream_file(str(confirmation_wav.with_suffix("")))
-                        session.append_event(
-                            "service_request_submission_prompt_played",
-                            {
-                                "turn": turn,
-                                "file": str(confirmation_wav),
-                                "text": confirmation,
-                                "agi_response": confirmation_response,
-                            },
+                    else:
+                        confirmation = SERVICE_REQUEST_NOTED_PHRASES.get(
+                            session.preferred_language,
+                            SERVICE_REQUEST_NOTED_PHRASES["en"],
                         )
-                        if agi_response_is_dead_channel(confirmation_response):
-                            session.append_event("hangup", {"reason": "dead channel during service request confirmation playback"})
-                            break
-                        drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
-                        if drained:
-                            session.append_event("eagi_audio_drained", {"after": "service_request_confirmation", "turn": turn, "bytes": drained})
+                    confirmation_wav = await synthesize_cached_phrase(
+                        client,
+                        session,
+                        confirmation,
+                        sounds_dir,
+                        "request_submitted",
+                    )
+                    confirmation_response = agi_stream_file(str(confirmation_wav.with_suffix("")))
+                    session.append_event(
+                        "service_request_submission_prompt_played",
+                        {
+                            "turn": turn,
+                            "file": str(confirmation_wav),
+                            "text": confirmation,
+                            "agi_response": confirmation_response,
+                        },
+                    )
+                    if agi_response_is_dead_channel(confirmation_response):
+                        session.append_event("hangup", {"reason": "dead channel during service request confirmation playback"})
+                        break
+                    drained = drain_audio_fd(3, eagi_frame_bytes, drain_after_playback_ms)
+                    if drained:
+                        session.append_event("eagi_audio_drained", {"after": "service_request_confirmation", "turn": turn, "bytes": drained})
                     threading.Thread(
                         target=append_service_request_email_result,
                         args=(session, result.service_request_action, submission),
