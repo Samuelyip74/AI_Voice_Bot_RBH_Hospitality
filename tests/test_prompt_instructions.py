@@ -18,6 +18,8 @@ def test_prompt_requires_context_intake():
 
 def test_prompt_has_required_hospitality_workflows():
     assert "Wake-up call: room number, date, time" in ASSISTANT_INSTRUCTIONS
+    assert "alarm_time" in ASSISTANT_INSTRUCTIONS
+    assert "local hotel ISO format" in ASSISTANT_INSTRUCTIONS
     assert "Housekeeping: room number" in ASSISTANT_INSTRUCTIONS
     assert "Transportation: pickup/drop-off location" in ASSISTANT_INSTRUCTIONS
     assert "Dining recommendation or reservation" in ASSISTANT_INSTRUCTIONS
@@ -87,3 +89,14 @@ def test_turn_instructions_include_known_room(monkeypatch):
 
     assert "Known caller room number is 1910" in instructions
     assert "do not ask for the room number again" in instructions
+
+
+def test_turn_instructions_include_hotel_datetime(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    from openai_realtime_client import OpenAIRealtimeClient
+
+    client = OpenAIRealtimeClient()
+    instructions = client._turn_instructions(CallSession(call_id="ctx"))
+
+    assert "Hotel local datetime is" in instructions
+    assert "Asia/Singapore" in instructions

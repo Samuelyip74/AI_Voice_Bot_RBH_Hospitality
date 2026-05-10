@@ -481,6 +481,53 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
         }
 
 
+def wakeup_call_api_payload(session: CallSession, payload: dict) -> dict:
+    return {
+        "room_number": payload.get("room_number") or session.room_number,
+        "alarm_time": payload.get("alarm_time") or payload.get("preferred_time"),
+        "followup_time": payload.get("followup_time"),
+        "frequency": payload.get("frequency") or os.getenv("WAKEUP_CALL_DEFAULT_FREQUENCY", "Once"),
+        "call_id": session.call_id,
+        "caller_id": session.caller_id,
+        "caller_name": session.caller_name,
+        "source": "voicebot",
+        "request": payload,
+    }
+
+
+def post_wakeup_call_request(session: CallSession, payload: dict) -> dict:
+    if (payload.get("category") or "").strip().lower() != "wake_up_call":
+        return {"sent": False, "skipped": True, "reason": "not a wake_up_call request"}
+    if os.getenv("WAKEUP_CALL_API_ENABLED", "true").lower() != "true":
+        return {"sent": False, "skipped": True, "reason": "WAKEUP_CALL_API_ENABLED is false"}
+
+    api_url = os.getenv("WAKEUP_CALL_API_URL", "").strip()
+    body = wakeup_call_api_payload(session, payload)
+    if not api_url:
+        return {"sent": False, "reason": "WAKEUP_CALL_API_URL is not configured", "payload": body}
+    if not body.get("room_number") or not body.get("alarm_time"):
+        return {"sent": False, "reason": "room_number and alarm_time are required", "payload": body}
+
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("WAKEUP_CALL_API_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = request.Request(api_url, data=encoded, headers=headers, method="POST")
+    timeout = float(os.getenv("WAKEUP_CALL_API_TIMEOUT_SECONDS", "8"))
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            response_body = response.read(4096).decode("utf-8", errors="replace")
+            return {
+                "sent": 200 <= response.status < 300,
+                "status": response.status,
+                "response": response_body,
+                "payload": body,
+            }
+    except Exception as exc:
+        return {"sent": False, "reason": str(exc), "payload": body}
+
+
 def rainbow_service_request_destination(payload: dict) -> tuple[str, str]:
     category = (payload.get("category") or "").strip().lower()
     summary = (payload.get("summary") or "").strip().lower()
@@ -1265,6 +1312,9 @@ async def run_call() -> int:
                 try:
                     submission, rainbow_submission = await submit_service_request_notifications(session, result.service_request_action)
                     session.append_event("service_request_submitted", submission)
+                    if (result.service_request_action.get("category") or "").strip().lower() == "wake_up_call":
+                        wakeup_result = await asyncio.to_thread(post_wakeup_call_request, session, result.service_request_action)
+                        session.append_event("wakeup_call_result", wakeup_result)
                     if rainbow_submission.get("queued"):
                         session.append_event("service_request_rainbow_queued", rainbow_submission)
                     else:

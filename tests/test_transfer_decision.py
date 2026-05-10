@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agi"))
@@ -9,6 +10,7 @@ from openai_realtime_client import OpenAIRealtimeClient
 from voice_assistant_eagi import (
     normalize_transfer_extension,
     notify_rainbow_service_request,
+    post_wakeup_call_request,
     rainbow_service_request_destination,
     service_request_confirmation_text,
     service_request_is_confirmed,
@@ -146,6 +148,72 @@ def test_service_request_confirmation_text_includes_summary_and_room():
     assert "Please confirm" in text
     assert "spaghetti aglio e olio" in text
     assert "1002" in text
+
+
+def test_wakeup_call_request_skips_without_api_url(monkeypatch):
+    monkeypatch.delenv("WAKEUP_CALL_API_URL", raising=False)
+    session = CallSession(call_id="wake-test", room_number="1910")
+
+    result = post_wakeup_call_request(
+        session,
+        {
+            "category": "wake_up_call",
+            "summary": "Wake-up call",
+            "alarm_time": "2026-05-10T06:30:00",
+            "confirmed_with_guest": True,
+        },
+    )
+
+    assert result["sent"] is False
+    assert "WAKEUP_CALL_API_URL" in result["reason"]
+    assert result["payload"]["room_number"] == "1910"
+
+
+def test_wakeup_call_request_posts_to_api(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _limit):
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("WAKEUP_CALL_API_URL", "http://api.local/api/wakeup-call")
+    monkeypatch.setenv("WAKEUP_CALL_API_TOKEN", "secret")
+    monkeypatch.setenv("WAKEUP_CALL_API_TIMEOUT_SECONDS", "3")
+    monkeypatch.setattr("voice_assistant_eagi.request.urlopen", fake_urlopen)
+    session = CallSession(call_id="wake-test", caller_id="1000", caller_name="Guest", room_number="1910")
+
+    result = post_wakeup_call_request(
+        session,
+        {
+            "category": "wake_up_call",
+            "summary": "Wake-up call",
+            "alarm_time": "2026-05-10T06:30:00",
+            "confirmed_with_guest": True,
+        },
+    )
+
+    assert result["sent"] is True
+    assert captured["url"] == "http://api.local/api/wakeup-call"
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    assert captured["timeout"] == 3
+    assert captured["body"]["room_number"] == "1910"
+    assert captured["body"]["alarm_time"] == "2026-05-10T06:30:00"
+    assert captured["body"]["frequency"] == "Once"
 
 
 def test_rainbow_room_service_destination_uses_room_service_bubble(monkeypatch):

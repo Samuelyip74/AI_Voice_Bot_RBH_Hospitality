@@ -7,7 +7,9 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from call_session import (
     SUPPORTED_LANGUAGES,
@@ -44,7 +46,7 @@ Conversation method:
 8. When the guest clearly says there are no more requests, thanks you and says goodbye, says "that's all", "nothing else", "no more", "no thank you", "bye", or similar, give a brief courteous closing in the guest's current language, then call the end_call tool. Do not ask another follow-up question after the guest has closed the conversation.
 
 Details to collect by request type:
-- Wake-up call: room number, date, time, AM/PM or 24-hour confirmation, one-time or repeated wake-up call, guest name if offered, preferred language if relevant. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category wake_up_call and confirmed_with_guest true.
+- Wake-up call: room number, date, time, AM/PM or 24-hour confirmation, one-time or repeated wake-up call, guest name if offered, preferred language if relevant. If the room number is already in Known details, use it and do not ask again. Convert the requested wake-up time to local hotel ISO format in alarm_time, for example 2026-05-10T06:30:00. Set followup_time only if a follow-up call is requested. Use frequency "Once" unless the guest asks for repeated wake-up calls. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category wake_up_call and confirmed_with_guest true.
 - Housekeeping: room number, item/service needed, preferred timing, urgency, access/privacy preference if relevant. For room cleaning, ask for the room number first if missing, then ask preferred timing or whether housekeeping may enter if needed. Repeat the full details and ask the guest to confirm. Only after confirmation, call submit_hotel_request with category housekeeping and confirmed_with_guest true.
 - Maintenance: room number, issue, severity, safety risk, whether someone may enter the room, preferred timing. Transfer urgent or safety-related issues to 1920.
 - Transportation: pickup/drop-off location, date/time, number of passengers, luggage, vehicle preference, child seat/accessibility needs, contact/room number.
@@ -163,6 +165,9 @@ SUBMIT_HOTEL_REQUEST_TOOL = {
             "room_number": {"type": "string", "description": "Guest room number if known."},
             "guest_name": {"type": "string", "description": "Guest name if known."},
             "preferred_time": {"type": "string", "description": "Requested time/date or timing preference if relevant."},
+            "alarm_time": {"type": "string", "description": "For wake_up_call only: local hotel ISO datetime, for example 2026-05-10T06:30:00."},
+            "followup_time": {"type": "string", "description": "For wake_up_call only: optional local hotel ISO datetime for a follow-up wake-up call."},
+            "frequency": {"type": "string", "description": "For wake_up_call only: Once unless the guest requests a repeated wake-up call."},
             "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
             "access_permission": {"type": "string", "description": "Whether staff may enter the room, if relevant."},
             "language": {"type": "string", "description": "Guest's current preferred language code."},
@@ -381,6 +386,13 @@ class OpenAIRealtimeClient:
     def _turn_instructions(self, session: CallSession) -> str:
         language_code = session.preferred_language
         language_name = SUPPORTED_LANGUAGES.get(language_code, language_code)
+        timezone_name = os.getenv("HOTEL_TIMEZONE", "Asia/Singapore")
+        try:
+            now = datetime.now(ZoneInfo(timezone_name))
+        except Exception:
+            timezone_name = "local"
+            now = datetime.now().astimezone()
+        current_time_hint = f"Hotel local datetime is {now.strftime('%Y-%m-%dT%H:%M:%S')} ({timezone_name}). "
         room_hint = ""
         if session.room_number:
             room_hint = (
@@ -390,6 +402,7 @@ class OpenAIRealtimeClient:
         return (
             f"Detected caller language for this turn: {language_name} ({language_code}). "
             f"{language_response_instruction(language_code)} "
+            f"{current_time_hint}"
             f"{room_hint} "
             "This turn's detected language overrides prior conversation language. "
             "If the guest explicitly asks to use another language, switch to that requested language immediately. "

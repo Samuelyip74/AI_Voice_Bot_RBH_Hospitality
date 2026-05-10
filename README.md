@@ -483,6 +483,11 @@ Hotel request webhook settings:
 HOTEL_REQUEST_WEBHOOK_URL=<webhook_url>
 HOTEL_REQUEST_WEBHOOK_TOKEN=<optional_bearer_token>
 HOTEL_REQUEST_WEBHOOK_TIMEOUT_SECONDS=8
+WAKEUP_CALL_API_ENABLED=true
+WAKEUP_CALL_API_URL=http://host.docker.internal:8000/api/wakeup-call
+WAKEUP_CALL_API_TOKEN=<optional_bearer_token>
+WAKEUP_CALL_API_TIMEOUT_SECONDS=8
+WAKEUP_CALL_DEFAULT_FREQUENCY=Once
 ```
 
 Rainbow Node SDK bubble notification settings:
@@ -506,9 +511,12 @@ RAINBOW_NODE_STOP_TIMEOUT_MS=5000
 
 When a confirmed OpenAI `submit_hotel_request` action is received, the voicebot submits to `HOTEL_REQUEST_WEBHOOK_URL` and queues a Rainbow bubble message. With `RAINBOW_NODE_ASYNC=true`, Rainbow delivery does not block the live phone call; the call log first records `service_request_rainbow_queued`, then records `service_request_rainbow_result` if the notifier finishes while the EAGI process is still running. `room_service` and `housekeeping` requests go to `RAINBOW_ROOM_SERVICE_BUBBLE_JID`; all other categories go to `RAINBOW_FRONT_DESK_BUBBLE_JID` unless `RAINBOW_ROOM_SERVICE_CATEGORIES` is expanded.
 
+For confirmed `wake_up_call` requests, the voicebot also calls `WAKEUP_CALL_API_URL`. Point this to the FastAPI backend `/api/wakeup-call` endpoint so the RHG wake-up call is created automatically in addition to the normal front-desk notification. In Docker Desktop, `http://host.docker.internal:8000/api/wakeup-call` reaches the API service published on the host.
+
 Check call logs for:
 
 - `service_request_submitted`
+- `wakeup_call_result`
 - `service_request_rainbow_queued`
 - `service_request_rainbow_result`
 - `service_request_email_result`
