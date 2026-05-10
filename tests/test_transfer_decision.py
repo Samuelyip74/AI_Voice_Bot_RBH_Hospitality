@@ -101,6 +101,12 @@ def test_same_language_chinese_room_number_transcript_is_not_ignored():
     assert reason is None
 
 
+def test_chinese_family_transcript_is_not_ignored_across_mandarin_and_cantonese():
+    ignored, reason = transcript_should_be_ignored("\u6211\u9700\u8981\u4e00\u6b21\u6027\u7684\u53eb\u9192\u670d\u52d9\u3002", "zh", 0.78, "zh-yue")
+    assert ignored is False
+    assert reason is None
+
+
 def test_parse_model_transfer_args(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     client = OpenAIRealtimeClient()

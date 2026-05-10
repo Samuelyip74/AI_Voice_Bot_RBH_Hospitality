@@ -273,6 +273,9 @@ JAPANESE_KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 HANGUL_PATTERN = re.compile(r"[\uac00-\ud7af]")
 ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff]")
 CANTONESE_PATTERN = re.compile(r"[唔咩係冇嘅喺佢哋]|而家|廣東話|粤语|粵語|執房|攞|搵|房口")
+MANDARIN_PATTERN = re.compile(
+    r"华语|華語|普通话|普通話|中文|请|请问|帮我|安排|服务|服務|叫醒服务|叫醒服務|需要|一次性|早上|确认|确认一下|可以讲|可以講"
+)
 VIETNAMESE_DIACRITIC_PATTERN = re.compile(
     r"[ăâêôơưđáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
     re.IGNORECASE,
@@ -325,6 +328,7 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
     normalized_plain = re.sub(r"[^\w\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+", "", normalized, flags=re.UNICODE)
     words_for_guard = re.findall(r"[a-zA-ZÀ-ÿ']+", normalized)
     cjk_chars = CJK_PATTERN.findall(text)
+    chinese_family_default = default in {"zh", "zh-yue"}
 
     if re.search(
         r"\b(speak|talk|use|continue|switch|change)\b.{0,30}\benglish\b"
@@ -342,6 +346,8 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
 
     for code, hints in LANGUAGE_HINTS:
         if any(hint.lower() in normalized for hint in hints):
+            if code == "zh-yue" and not CANTONESE_PATTERN.search(text):
+                continue
             return code, 0.92
 
     for code, pattern in SCRIPT_PATTERNS.items():
@@ -370,8 +376,14 @@ def detect_language_from_text(text: str, default: str = "en") -> tuple[str, floa
         return "ar", 0.82
 
     if CJK_PATTERN.search(text):
-        if CANTONESE_PATTERN.search(text):
+        cantonese_marker = CANTONESE_PATTERN.search(text)
+        mandarin_marker = MANDARIN_PATTERN.search(text)
+        if cantonese_marker and not mandarin_marker:
+            return "zh-yue", 0.92
+        if cantonese_marker:
             return "zh-yue", 0.86
+        if chinese_family_default:
+            return default, 0.86
         return "zh", 0.78
 
     if VIETNAMESE_STRONG_DIACRITIC_PATTERN.search(text):

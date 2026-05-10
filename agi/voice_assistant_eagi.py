@@ -151,6 +151,7 @@ DEFAULT_PERSONAL_GREETING_TEXT = "Hello {caller_name}, my name is Nova, your per
 FOREIGN_SCRIPT_PATTERN = re.compile(
     r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\u0600-\u06ff\u0900-\u097f\u0b80-\u0bff\u0e00-\u0e7f]"
 )
+CJK_SCRIPT_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def parse_agi_env(stdin: object = sys.stdin) -> dict[str, str]:
@@ -386,10 +387,14 @@ def transcript_should_be_ignored(
     if not text:
         return True, "empty transcript"
 
+    chinese_family = {detected_language, preferred_language} <= {"zh", "zh-yue"}
     min_words = int(os.getenv("MIN_TRANSCRIPT_WORDS", "2"))
     switch_threshold = float(os.getenv("LANGUAGE_SWITCH_CONFIDENCE", "0.90"))
     short_chars = int(os.getenv("LOW_CONFIDENCE_TRANSCRIPT_MAX_CHARS", "16"))
     words = re.findall(r"[\w']+", text, flags=re.UNICODE)
+
+    if chinese_family and CJK_SCRIPT_PATTERN.search(text):
+        return False, None
 
     if detected_language != preferred_language and confidence < switch_threshold:
         if FOREIGN_SCRIPT_PATTERN.search(text) or len(text) <= short_chars or len(words) < min_words:
