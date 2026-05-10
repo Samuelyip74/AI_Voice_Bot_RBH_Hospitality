@@ -20,6 +20,7 @@ from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formataddr
 from urllib import request
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
 
 from dotenv import load_dotenv
@@ -481,12 +482,29 @@ def post_hotel_request(session: CallSession, payload: dict) -> dict:
         }
 
 
+def normalize_wakeup_frequency(value: str | None) -> str:
+    normalized = (value or os.getenv("WAKEUP_CALL_DEFAULT_FREQUENCY", "Once")).strip().lower()
+    mappings = {
+        "once": "Once",
+        "one-time": "Once",
+        "one time": "Once",
+        "single": "Once",
+        "daily": "Daily",
+        "every day": "Daily",
+        "repeat daily": "Daily",
+        "weekly": "Weekly",
+        "every week": "Weekly",
+        "repeat weekly": "Weekly",
+    }
+    return mappings.get(normalized, "Once")
+
+
 def wakeup_call_api_payload(session: CallSession, payload: dict) -> dict:
     return {
         "room_number": payload.get("room_number") or session.room_number,
         "alarm_time": payload.get("alarm_time") or payload.get("preferred_time"),
         "followup_time": payload.get("followup_time"),
-        "frequency": payload.get("frequency") or os.getenv("WAKEUP_CALL_DEFAULT_FREQUENCY", "Once"),
+        "frequency": normalize_wakeup_frequency(payload.get("frequency")),
         "call_id": session.call_id,
         "caller_id": session.caller_id,
         "caller_name": session.caller_name,
@@ -524,6 +542,17 @@ def post_wakeup_call_request(session: CallSession, payload: dict) -> dict:
                 "response": response_body,
                 "payload": body,
             }
+    except HTTPError as exc:
+        response_body = exc.read(4096).decode("utf-8", errors="replace")
+        return {
+            "sent": False,
+            "status": exc.code,
+            "reason": str(exc),
+            "response": response_body,
+            "payload": body,
+        }
+    except URLError as exc:
+        return {"sent": False, "reason": str(exc), "payload": body}
     except Exception as exc:
         return {"sent": False, "reason": str(exc), "payload": body}
 
@@ -865,6 +894,99 @@ def service_request_is_confirmed(action: dict | None) -> bool:
     if not action:
         return False
     return action.get("confirmed_with_guest") is True
+
+
+CONFIRMATION_TEXT_PATTERNS = [
+    r"\byes\b",
+    r"\byep\b",
+    r"\byeah\b",
+    r"\bok(?:ay)?\b",
+    r"\bcorrect\b",
+    r"\bthat's correct\b",
+    r"\bthat is correct\b",
+    r"\bright\b",
+    r"\bconfirmed?\b",
+    r"\bconfirm\b",
+    r"\bplease proceed\b",
+    r"\bgo ahead\b",
+    r"\bsure\b",
+    r"\bno problem\b",
+    r"\bdo it\b",
+    r"\bsubmit it\b",
+]
+
+
+CONFIRMATION_TEXT_PATTERNS.extend(
+    [
+        "\u6ca1\u6709\u95ee\u9898",
+        "\u6ca1\u95ee\u9898",
+        "\u6c92\u6709\u554f\u984c",
+        "\u53ef\u4ee5",
+        "\u5bf9",
+        "\u5c0d",
+        "\u6b63\u786e",
+        "\u6b63\u78ba",
+        "\u786e\u8ba4",
+        "\u78ba\u8a8d",
+        "\u662f\u7684",
+        "\u597d\u7684",
+        "\u597d",
+    ]
+)
+
+
+def transcript_confirms_service_request(text: str | None) -> bool:
+    cleaned = (text or "").strip().lower()
+    if not cleaned:
+        return False
+    return any(re.search(pattern, cleaned, re.IGNORECASE) for pattern in CONFIRMATION_TEXT_PATTERNS)
+
+
+def service_request_can_be_submitted(action: dict | None, transcript: str | None) -> tuple[bool, str | None]:
+    if not service_request_is_confirmed(action):
+        return False, "model attempted to submit before explicit guest confirmation"
+    if transcript_confirms_service_request(transcript):
+        return True, None
+    return False, "model marked request confirmed but caller did not explicitly confirm in this turn"
+
+
+def _normalize_request_value(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def service_request_fingerprint(action: dict | None) -> tuple[str, ...] | None:
+    if not action:
+        return None
+    category = _normalize_request_value(action.get("category"))
+    room = _normalize_request_value(action.get("room_number"))
+    if category == "wake_up_call":
+        return (
+            category,
+            room,
+            _normalize_request_value(action.get("alarm_time")),
+            normalize_wakeup_frequency(action.get("frequency")),
+        )
+    if category == "room_service":
+        return (category, room, _normalize_request_value(action.get("summary")))
+    return (
+        category,
+        room,
+        _normalize_request_value(action.get("summary")),
+        _normalize_request_value(action.get("preferred_time") or action.get("alarm_time")),
+    )
+
+
+def service_request_already_submitted(session: CallSession, action: dict | None) -> tuple[bool, dict | None]:
+    fingerprint = service_request_fingerprint(action)
+    if fingerprint is None:
+        return False, None
+    for event in session.history:
+        if event.get("type") != "service_request_submitted":
+            continue
+        submitted = (event.get("payload") or {}).get("request")
+        if service_request_fingerprint(submitted) == fingerprint:
+            return True, submitted
+    return False, None
 
 
 def service_request_confirmation_text(action: dict, language: str) -> str:
@@ -1233,6 +1355,27 @@ async def run_call() -> int:
                     "action": "end_call",
                     "reason": end_call_reason or "guest indicated there are no more requests",
                 }
+            if result.end_call_action and result.service_request_action:
+                session.append_event(
+                    "service_request_action_ignored",
+                    {
+                        "reason": "end_call takes priority over service request submission",
+                        "request": result.service_request_action,
+                    },
+                )
+                result.service_request_action = None
+            if result.service_request_action:
+                duplicate, submitted_request = service_request_already_submitted(session, result.service_request_action)
+                if duplicate:
+                    session.append_event(
+                        "service_request_duplicate_ignored",
+                        {
+                            "reason": "same request was already submitted in this call",
+                            "request": result.service_request_action,
+                            "matched_request": submitted_request,
+                        },
+                    )
+                    result.service_request_action = None
 
             transfer, reason = should_transfer_deterministic(result.transcript, session.failed_intent_count)
             target_extension = transfer_extension
@@ -1284,11 +1427,15 @@ async def run_call() -> int:
                     continue
 
             if result.service_request_action:
-                if not service_request_is_confirmed(result.service_request_action):
+                can_submit, confirmation_reason = service_request_can_be_submitted(
+                    result.service_request_action,
+                    result.transcript,
+                )
+                if not can_submit:
                     session.append_event(
                         "service_request_confirmation_required",
                         {
-                            "reason": "model attempted to submit before explicit guest confirmation",
+                            "reason": confirmation_reason,
                             "request": result.service_request_action,
                         },
                     )

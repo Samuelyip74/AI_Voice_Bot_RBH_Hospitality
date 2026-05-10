@@ -136,6 +136,23 @@ def guest_is_deleted(guest: dict) -> bool:
 def get_room_id(room: dict) -> str | None:
     return room.get("id") or room.get("Id") or room.get("roomId") or room.get("RoomId")
 
+
+def normalize_wakeup_frequency(value: str | None) -> str:
+    normalized = (value or "Once").strip().lower()
+    mappings = {
+        "once": "Once",
+        "one-time": "Once",
+        "one time": "Once",
+        "single": "Once",
+        "daily": "Daily",
+        "every day": "Daily",
+        "repeat daily": "Daily",
+        "weekly": "Weekly",
+        "every week": "Weekly",
+        "repeat weekly": "Weekly",
+    }
+    return mappings.get(normalized, "Once")
+
 # -----------------------------------------------------------------------------
 # ROOT
 # -----------------------------------------------------------------------------
@@ -379,7 +396,7 @@ async def wakeup_call_proxy(payload: dict):
     room_number = payload.get("room_number")
     alarm_time = payload.get("alarm_time")
     followup_time = payload.get("followup_time")
-    frequency = payload.get("frequency") or "Once"
+    frequency = normalize_wakeup_frequency(payload.get("frequency"))
 
     if not room_number or not alarm_time:
         raise HTTPException(status_code=400, detail="room_number and alarm_time are required")
@@ -413,4 +430,4 @@ async def wakeup_call_proxy(payload: dict):
         )
     except (ApiError, AuthenticationError, RequestError) as exc:
         logger.error(f"Wakeup upstream error: {exc}")
-        raise HTTPException(status_code=502, detail="Wakeup service unavailable")
+        raise HTTPException(status_code=502, detail=f"Wakeup service unavailable: {exc}")

@@ -167,7 +167,7 @@ SUBMIT_HOTEL_REQUEST_TOOL = {
             "preferred_time": {"type": "string", "description": "Requested time/date or timing preference if relevant."},
             "alarm_time": {"type": "string", "description": "For wake_up_call only: local hotel ISO datetime, for example 2026-05-10T06:30:00."},
             "followup_time": {"type": "string", "description": "For wake_up_call only: optional local hotel ISO datetime for a follow-up wake-up call."},
-            "frequency": {"type": "string", "description": "For wake_up_call only: Once unless the guest requests a repeated wake-up call."},
+            "frequency": {"type": "string", "enum": ["Once", "Daily", "Weekly"], "description": "For wake_up_call only: use Once unless the guest requests a repeated wake-up call."},
             "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
             "access_permission": {"type": "string", "description": "Whether staff may enter the room, if relevant."},
             "language": {"type": "string", "description": "Guest's current preferred language code."},

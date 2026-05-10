@@ -34,6 +34,8 @@ flowchart LR
 - `tests/`: Python unit tests for voice bot logic.
 - `logs/`: Runtime call logs and generated artifacts.
 
+For code-level onboarding, read [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md). It explains the main modules, call flow, integration points, logs, tests, and safe contribution workflow.
+
 ## Docker Services
 
 `docker-compose.yml` defines:

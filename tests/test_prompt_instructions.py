@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agi"))
 
 from call_session import CallSession
-from openai_realtime_client import ASSISTANT_INSTRUCTIONS, build_prior_call_context
+from openai_realtime_client import ASSISTANT_INSTRUCTIONS, SUBMIT_HOTEL_REQUEST_TOOL, build_prior_call_context
 
 
 def test_prompt_requires_context_intake():
@@ -20,6 +20,7 @@ def test_prompt_has_required_hospitality_workflows():
     assert "Wake-up call: room number, date, time" in ASSISTANT_INSTRUCTIONS
     assert "alarm_time" in ASSISTANT_INSTRUCTIONS
     assert "local hotel ISO format" in ASSISTANT_INSTRUCTIONS
+    assert SUBMIT_HOTEL_REQUEST_TOOL["parameters"]["properties"]["frequency"]["enum"] == ["Once", "Daily", "Weekly"]
     assert "Housekeeping: room number" in ASSISTANT_INSTRUCTIONS
     assert "Transportation: pickup/drop-off location" in ASSISTANT_INSTRUCTIONS
     assert "Dining recommendation or reservation" in ASSISTANT_INSTRUCTIONS

@@ -9,12 +9,17 @@ from call_session import CallSession, determine_transfer_action, should_end_call
 from openai_realtime_client import OpenAIRealtimeClient
 from voice_assistant_eagi import (
     normalize_transfer_extension,
+    normalize_wakeup_frequency,
     notify_rainbow_service_request,
     post_wakeup_call_request,
     rainbow_service_request_destination,
+    service_request_already_submitted,
+    service_request_can_be_submitted,
     service_request_confirmation_text,
+    service_request_fingerprint,
     service_request_is_confirmed,
     submit_service_request_notifications,
+    transcript_confirms_service_request,
     transcript_should_be_ignored,
 )
 
@@ -38,7 +43,7 @@ def test_hospitality_transfer_routes_to_concierge():
 
 
 def test_chinese_front_desk_transfer_routes_to_concierge():
-    action = determine_transfer_action("你可以幫我轉接去前台嗎?")
+    action = determine_transfer_action("\u4f60\u53ef\u4ee5\u5e6b\u6211\u8f49\u63a5\u53bb\u524d\u53f0\u55ce?")
     assert action["extension"] == "1920"
     assert action["transfer_type"] == "human"
 
@@ -67,13 +72,18 @@ def test_room_transfer_keeps_guest_room_number():
 
 
 def test_short_low_confidence_foreign_transcript_is_ignored():
-    ignored, reason = transcript_should_be_ignored("見た。", "ja", 0.82, "en")
+    ignored, reason = transcript_should_be_ignored("\u898b\u305f\u3002", "ja", 0.82, "en")
     assert ignored is True
     assert "low-confidence foreign transcript" in reason
 
 
 def test_clear_language_switch_transcript_is_not_ignored():
-    ignored, reason = transcript_should_be_ignored("こんにちは、ルームサービスをお願いします", "ja", 0.92, "en")
+    ignored, reason = transcript_should_be_ignored(
+        "\u3053\u3093\u306b\u3061\u306f\u3001\u30eb\u30fc\u30e0\u30b5\u30fc\u30d3\u30b9\u3092\u304a\u9858\u3044\u3057\u307e\u3059",
+        "ja",
+        0.92,
+        "en",
+    )
     assert ignored is False
     assert reason is None
 
@@ -85,7 +95,7 @@ def test_normal_english_transcript_is_not_ignored():
 
 
 def test_same_language_chinese_room_number_transcript_is_not_ignored():
-    ignored, reason = transcript_should_be_ignored("我的房間是一零零一。", "zh", 0.78, "zh")
+    ignored, reason = transcript_should_be_ignored("\u6211\u7684\u623f\u9593\u662f\u4e00\u96f6\u96f6\u4e00\u3002", "zh", 0.78, "zh")
     assert ignored is False
     assert reason is None
 
@@ -140,6 +150,82 @@ def test_service_request_requires_explicit_confirmation():
     assert service_request_is_confirmed({}) is False
 
 
+def test_service_request_requires_confirmation_in_current_transcript():
+    can_submit, reason = service_request_can_be_submitted(
+        {"category": "room_service", "summary": "Prawn aglio olio", "confirmed_with_guest": True},
+        "I'd like to order prawn aglio olio.",
+    )
+
+    assert can_submit is False
+    assert "caller did not explicitly confirm" in reason
+
+
+def test_service_request_allows_explicit_confirmation_transcript():
+    can_submit, reason = service_request_can_be_submitted(
+        {"category": "wake_up_call", "summary": "Wake-up call", "confirmed_with_guest": True},
+        "Yes, that's correct.",
+    )
+
+    assert can_submit is True
+    assert reason is None
+
+def test_chinese_confirmation_transcript_is_recognized():
+    assert transcript_confirms_service_request("\u6ca1\u6709\u95ee\u9898\u3002") is True
+    assert transcript_confirms_service_request("\u53ef\u4ee5\u7684\uff0c\u73b0\u5728\u8fc7\u6765\u5427\u3002") is True
+
+
+def test_wakeup_duplicate_ignores_summary_variation():
+    first = {
+        "category": "wake_up_call",
+        "summary": "Wake-up call at 7 a.m.",
+        "room_number": "1910",
+        "alarm_time": "2026-05-11T07:00:00",
+        "frequency": "Once",
+    }
+    repeated = {
+        "category": "wake_up_call",
+        "summary": "Wake-up call at 7 a.m. tomorrow",
+        "room_number": "1910",
+        "alarm_time": "2026-05-11T07:00:00",
+        "frequency": "once",
+    }
+
+    assert service_request_fingerprint(first) == service_request_fingerprint(repeated)
+
+
+def test_service_request_already_submitted_detects_duplicate():
+    session = CallSession(call_id="dup-test")
+    session.append_event(
+        "service_request_submitted",
+        {
+            "sent": True,
+            "payload": {
+                "request": {
+                    "category": "wake_up_call",
+                    "summary": "Wake-up call at 7 a.m.",
+                    "room_number": "1910",
+                    "alarm_time": "2026-05-11T07:00:00",
+                    "frequency": "Once",
+                },
+            },
+        },
+    )
+
+    duplicate, matched = service_request_already_submitted(
+        session,
+        {
+            "category": "wake_up_call",
+            "summary": "Wake-up call at 7 a.m. tomorrow",
+            "room_number": "1910",
+            "alarm_time": "2026-05-11T07:00:00",
+            "frequency": "once",
+        },
+    )
+
+    assert duplicate is True
+    assert matched["category"] == "wake_up_call"
+
+
 def test_service_request_confirmation_text_includes_summary_and_room():
     text = service_request_confirmation_text(
         {"summary": "spaghetti aglio e olio", "room_number": "1002"},
@@ -167,6 +253,13 @@ def test_wakeup_call_request_skips_without_api_url(monkeypatch):
     assert result["sent"] is False
     assert "WAKEUP_CALL_API_URL" in result["reason"]
     assert result["payload"]["room_number"] == "1910"
+
+
+def test_wakeup_frequency_is_normalized():
+    assert normalize_wakeup_frequency("once") == "Once"
+    assert normalize_wakeup_frequency("daily") == "Daily"
+    assert normalize_wakeup_frequency("every week") == "Weekly"
+    assert normalize_wakeup_frequency("unexpected") == "Once"
 
 
 def test_wakeup_call_request_posts_to_api(monkeypatch):
@@ -203,6 +296,7 @@ def test_wakeup_call_request_posts_to_api(monkeypatch):
             "category": "wake_up_call",
             "summary": "Wake-up call",
             "alarm_time": "2026-05-10T06:30:00",
+            "frequency": "once",
             "confirmed_with_guest": True,
         },
     )
