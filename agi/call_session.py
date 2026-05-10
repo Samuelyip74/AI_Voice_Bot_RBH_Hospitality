@@ -93,6 +93,7 @@ URGENT_TRANSFER_PATTERNS = [
 END_CALL_PATTERNS = [
     r"\bthat'?s all\b",
     r"\bnothing else\b",
+    r"\bnothing for now\b",
     r"\bno more\b",
     r"\bno thanks\b",
     r"\bno thank you\b",

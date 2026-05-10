@@ -232,6 +232,18 @@ def build_prior_call_context(session: CallSession, max_dialogue_events: int = 12
             }
             if event.get("room_number"):
                 known["room_number"] = str(event.get("room_number"))
+        elif event_type == "service_request_confirmation_required":
+            request = event.get("request", {})
+            pending = {
+                "status": "awaiting_guest_confirmation",
+                "category": request.get("category"),
+                "summary": request.get("summary"),
+                "room_number": request.get("room_number"),
+                "preferred_time": request.get("preferred_time"),
+                "confirmed_with_guest": False,
+            }
+            if request.get("room_number"):
+                known["room_number"] = str(request.get("room_number"))
         elif event_type == "service_request_submitted":
             request = event.get("payload", {}).get("request", {})
             if request:

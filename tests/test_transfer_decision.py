@@ -18,6 +18,7 @@ from voice_assistant_eagi import (
     service_request_confirmation_text,
     service_request_fingerprint,
     service_request_is_confirmed,
+    latest_unsubmitted_pending_service_request,
     submit_service_request_notifications,
     transcript_confirms_service_request,
     transcript_should_be_ignored,
@@ -137,6 +138,12 @@ def test_end_call_trigger_when_guest_has_no_more_requests():
     assert reason
 
 
+def test_end_call_trigger_when_guest_says_nothing_for_now():
+    should_end, reason = should_end_call_deterministic("Nothing for now, thank you.")
+    assert should_end is True
+    assert reason
+
+
 def test_parse_end_call_args(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     client = OpenAIRealtimeClient()
@@ -168,6 +175,7 @@ def test_service_request_allows_explicit_confirmation_transcript():
 
     assert can_submit is True
     assert reason is None
+
 
 def test_chinese_confirmation_transcript_is_recognized():
     assert transcript_confirms_service_request("\u6ca1\u6709\u95ee\u9898\u3002") is True
@@ -226,14 +234,75 @@ def test_service_request_already_submitted_detects_duplicate():
     assert matched["category"] == "wake_up_call"
 
 
+def test_latest_pending_request_survives_duplicate_old_request():
+    session = CallSession(call_id="pending-test")
+    session.append_event(
+        "service_request_submitted",
+        {
+            "sent": True,
+            "payload": {
+                "request": {
+                    "category": "wake_up_call",
+                    "summary": "Wake-up call at 7 a.m.",
+                    "room_number": "1910",
+                    "alarm_time": "2026-05-12T07:00:00",
+                    "frequency": "Once",
+                },
+            },
+        },
+    )
+    session.append_event(
+        "service_request_confirmation_required",
+        {
+            "reason": "model marked request confirmed but caller did not explicitly confirm in this turn",
+            "request": {
+                "category": "room_service",
+                "summary": "Order for prawn aglio olio and a Coke.",
+                "room_number": "1910",
+                "priority": "normal",
+                "language": "en",
+                "confirmed_with_guest": True,
+            },
+        },
+    )
+
+    pending = latest_unsubmitted_pending_service_request(session)
+
+    assert pending["category"] == "room_service"
+    assert pending["confirmed_with_guest"] is True
+
+
+def test_submitted_pending_request_is_not_recovered_again():
+    session = CallSession(call_id="pending-submitted-test")
+    request = {
+        "category": "room_service",
+        "summary": "Order for prawn aglio olio and a Coke.",
+        "room_number": "1910",
+        "priority": "normal",
+        "language": "en",
+        "confirmed_with_guest": True,
+    }
+    session.append_event(
+        "service_request_confirmation_required",
+        {"reason": "needs confirmation", "request": request},
+    )
+    session.append_event(
+        "service_request_submitted",
+        {"sent": True, "payload": {"request": request}},
+    )
+
+    assert latest_unsubmitted_pending_service_request(session) is None
+
+
 def test_service_request_confirmation_text_includes_summary_and_room():
     text = service_request_confirmation_text(
-        {"summary": "spaghetti aglio e olio", "room_number": "1002"},
+        {"summary": "spaghetti aglio e olio.", "room_number": "1002"},
         "en",
     )
     assert "Please confirm" in text
     assert "spaghetti aglio e olio" in text
     assert "1002" in text
+    assert ". for room" not in text
 
 
 def test_wakeup_call_request_skips_without_api_url(monkeypatch):

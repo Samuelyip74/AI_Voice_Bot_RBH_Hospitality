@@ -989,8 +989,24 @@ def service_request_already_submitted(session: CallSession, action: dict | None)
     return False, None
 
 
+def latest_unsubmitted_pending_service_request(session: CallSession) -> dict | None:
+    for event in reversed(session.history):
+        if event.get("type") != "service_request_confirmation_required":
+            continue
+        request_payload = event.get("request")
+        if not isinstance(request_payload, dict):
+            continue
+        duplicate, _submitted_request = service_request_already_submitted(session, request_payload)
+        if duplicate:
+            continue
+        pending = dict(request_payload)
+        pending["confirmed_with_guest"] = True
+        return pending
+    return None
+
+
 def service_request_confirmation_text(action: dict, language: str) -> str:
-    summary = action.get("summary", "this request")
+    summary = str(action.get("summary") or "this request").strip().rstrip(".。")
     room = action.get("room_number")
     if language == "zh":
         room_text = f"，房号 {room}" if room else ""
@@ -1005,7 +1021,7 @@ def service_request_confirmation_text(action: dict, language: str) -> str:
         room_text = f" untuk kamar {room}" if room else ""
         return f"Mohon konfirmasi: apakah Anda ingin saya mengirim permintaan ini, {summary}{room_text}?"
     room_text = f" for room {room}" if room else ""
-    return f"Please confirm: would you like me to submit this request, {summary}{room_text}?"
+    return f"Please confirm: would you like me to submit this request{room_text}: {summary}?"
 
 
 def transfer_reclaim_enabled() -> bool:
@@ -1376,6 +1392,21 @@ async def run_call() -> int:
                         },
                     )
                     result.service_request_action = None
+            if (
+                not result.service_request_action
+                and not result.end_call_action
+                and transcript_confirms_service_request(result.transcript)
+            ):
+                pending_request = latest_unsubmitted_pending_service_request(session)
+                if pending_request:
+                    result.service_request_action = apply_known_room_number(session, pending_request)
+                    session.append_event(
+                        "service_request_pending_confirmed",
+                        {
+                            "reason": "caller confirmed the latest pending service request",
+                            "request": result.service_request_action,
+                        },
+                    )
 
             transfer, reason = should_transfer_deterministic(result.transcript, session.failed_intent_count)
             target_extension = transfer_extension

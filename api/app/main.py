@@ -6,6 +6,7 @@ import asyncio
 import httpx
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import os
 from typing import Dict
@@ -152,6 +153,109 @@ def normalize_wakeup_frequency(value: str | None) -> str:
         "repeat weekly": "Weekly",
     }
     return mappings.get(normalized, "Once")
+
+
+def normalize_wakeup_datetime_for_pms(dt_str: str) -> str:
+    """
+    Convert a hotel-local or timezone-aware ISO datetime to the UTC-naive format
+    expected by Rainbow Hospitality wake-up alarms.
+
+    Voicebot requests intentionally send hotel-local wall time without an offset,
+    e.g. 2026-05-12T07:00:00. Browser requests may send UTC with a Z suffix.
+    RBH stores/displays wake-up alarms as local time after interpreting the API
+    value as UTC, so naive local times must be shifted to UTC before submission.
+    """
+    hotel_timezone = os.getenv("HOTEL_TIMEZONE", "Asia/Singapore")
+    pms_time_basis = os.getenv("PMS_WAKEUP_TIME_BASIS", "utc").strip().lower()
+    try:
+        parsed = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+    except Exception:
+        return dt_str
+
+    if pms_time_basis in {"local", "hotel", "no_conversion"}:
+        return parsed.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(hotel_timezone))
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def parse_iso_datetime(dt_str: str | None) -> datetime | None:
+    if not dt_str:
+        return None
+    try:
+        return datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def hotel_local_date(dt_str: str | None) -> str | None:
+    parsed = parse_iso_datetime(dt_str)
+    if parsed is None:
+        return None
+    hotel_timezone = ZoneInfo(os.getenv("HOTEL_TIMEZONE", "Asia/Singapore"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=hotel_timezone)
+    return parsed.astimezone(hotel_timezone).date().isoformat()
+
+
+def wakeup_room_number(wakeup: dict) -> str | None:
+    room = (
+        ((wakeup.get("roomActions") or {}).get("room") or {})
+        or ((wakeup.get("RoomActions") or {}).get("Room") or {})
+    )
+    return str(room.get("roomNumber") or room.get("RoomNumber") or "") or None
+
+
+def wakeup_id(wakeup: dict) -> str | None:
+    value = wakeup.get("id") or wakeup.get("Id")
+    return str(value) if value else None
+
+
+def wakeup_alarm_time(wakeup: dict) -> str | None:
+    return wakeup.get("alarmTime") or wakeup.get("AlarmTime") or wakeup.get("fromDate") or wakeup.get("FromDate")
+
+
+def wakeup_created_time(wakeup: dict) -> datetime:
+    return parse_iso_datetime(wakeup.get("createdDate") or wakeup.get("CreatedDate")) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def wakeup_is_active(wakeup: dict) -> bool:
+    status = str(wakeup.get("status") or wakeup.get("Status") or "").strip().lower()
+    return not bool(wakeup.get("isDeleted") or wakeup.get("IsDeleted")) and status not in {"deleted", "cancelled", "canceled", "completed"}
+
+
+def find_wakeup_calls_for_room_date(pms: RainbowClient, room_number: str, requested_alarm_time: str) -> list[dict]:
+    requested_date = hotel_local_date(requested_alarm_time)
+    if not requested_date:
+        return []
+    payload = pms.get_wakeup_calls(page_number=1, page_size=int(os.getenv("PMS_WAKEUP_LOOKUP_PAGE_SIZE", "100")))
+    matches = []
+    for wakeup in extract_paginated_items(payload):
+        if not wakeup_is_active(wakeup):
+            continue
+        if wakeup_room_number(wakeup) != str(room_number):
+            continue
+        if hotel_local_date(wakeup_alarm_time(wakeup)) == requested_date:
+            matches.append(wakeup)
+    matches.sort(key=wakeup_created_time, reverse=True)
+    return matches
+
+
+def delete_extra_wakeup_calls(pms: RainbowClient, wakeups: list[dict], keep_id: str) -> list[dict]:
+    if os.getenv("PMS_WAKEUP_DEDUPLICATE_SAME_DAY", "true").strip().lower() != "true":
+        return []
+    deleted = []
+    for wakeup in wakeups:
+        current_id = wakeup_id(wakeup)
+        if not current_id or current_id == keep_id:
+            continue
+        try:
+            deleted.append({"id": current_id, "result": pms.delete_wakeup_call(current_id)})
+        except (ApiError, AuthenticationError, RequestError) as exc:
+            logger.warning("Could not delete duplicate wakeup call id=%s: %s", current_id, exc)
+            deleted.append({"id": current_id, "error": str(exc)})
+    return deleted
 
 # -----------------------------------------------------------------------------
 # ROOT
@@ -401,16 +505,6 @@ async def wakeup_call_proxy(payload: dict):
     if not room_number or not alarm_time:
         raise HTTPException(status_code=400, detail="room_number and alarm_time are required")
 
-    def normalize_dt(dt_str: str) -> str:
-        """Normalize datetime string to 'YYYY-MM-DDTHH:MM:SS' (no timezone)."""
-        try:
-            from datetime import datetime
-
-            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
-        except Exception:
-            return dt_str
-
     pms = await asyncio.to_thread(build_pms_client)
     room = await find_room_by_number(room_number, pms)
     if not room:
@@ -420,14 +514,49 @@ async def wakeup_call_proxy(payload: dict):
     if not room_id:
         raise HTTPException(status_code=500, detail="Room id missing in PMS response")
 
+    pms_alarm_time = normalize_wakeup_datetime_for_pms(alarm_time)
+    pms_followup_time = normalize_wakeup_datetime_for_pms(followup_time or alarm_time)
+    existing_wakeups = await asyncio.to_thread(find_wakeup_calls_for_room_date, pms, room_number, alarm_time)
+    existing_wakeup = existing_wakeups[0] if existing_wakeups else None
+    existing_wakeup_id = wakeup_id(existing_wakeup) if existing_wakeup else None
+    logger.info(
+        "%s wakeup call room=%s requested_alarm=%s pms_alarm=%s requested_followup=%s pms_followup=%s existing_id=%s basis=%s timezone=%s",
+        "Updating" if existing_wakeup_id else "Creating",
+        room_number,
+        alarm_time,
+        pms_alarm_time,
+        followup_time,
+        pms_followup_time,
+        existing_wakeup_id,
+        os.getenv("PMS_WAKEUP_TIME_BASIS", "utc"),
+        os.getenv("HOTEL_TIMEZONE", "Asia/Singapore"),
+    )
+
     try:
-        return await asyncio.to_thread(
+        if existing_wakeup_id:
+            result = await asyncio.to_thread(
+                pms.update_wakeup_call,
+                wakeup_id=existing_wakeup_id,
+                alarm_time=pms_alarm_time,
+                followup_time=pms_followup_time,
+            )
+            deleted_duplicates = await asyncio.to_thread(delete_extra_wakeup_calls, pms, existing_wakeups, existing_wakeup_id)
+            if isinstance(result, dict):
+                result.setdefault("operation", "updated")
+                result.setdefault("wakeup_id", existing_wakeup_id)
+                if deleted_duplicates:
+                    result["deleted_duplicates"] = deleted_duplicates
+            return result
+        result = await asyncio.to_thread(
             pms.create_wakeup_call,
             room_id=room_id,
-            alarm_time=normalize_dt(alarm_time),
-            followup_time=normalize_dt(followup_time or alarm_time),
+            alarm_time=pms_alarm_time,
+            followup_time=pms_followup_time,
             frequency=frequency,
         )
+        if isinstance(result, dict):
+            result.setdefault("operation", "created")
+        return result
     except (ApiError, AuthenticationError, RequestError) as exc:
         logger.error(f"Wakeup upstream error: {exc}")
         raise HTTPException(status_code=502, detail=f"Wakeup service unavailable: {exc}")
