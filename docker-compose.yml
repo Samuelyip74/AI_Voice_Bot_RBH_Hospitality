@@ -49,6 +49,8 @@ services:
     user: root
     restart: unless-stopped
     network_mode: bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "5060:5060/udp"
       - "5061:5061/tcp"
