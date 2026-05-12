@@ -43,6 +43,10 @@ asterisk/*.tmp
 *.log
 docker-compose.override.yml
 
+# Let's Encrypt runtime state and private account/certificate material
+certbot/conf/
+certbot/www/.well-known/acme-challenge/*
+
 # Frontend generated artifacts
 node_modules/
 frontend/dist/

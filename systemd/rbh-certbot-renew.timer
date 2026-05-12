@@ -1,0 +1,11 @@
+[Unit]
+Description=Run webapp.ale-demo.org certificate renewal twice daily
+
+[Timer]
+OnCalendar=*-*-* 03,15:17:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=rbh-certbot-renew.service
+
+[Install]
+WantedBy=timers.target

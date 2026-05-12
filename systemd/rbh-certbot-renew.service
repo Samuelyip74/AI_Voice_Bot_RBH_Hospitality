@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Let's Encrypt certificate for webapp.ale-demo.org
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/sadmin/AI_Voice_Bot_RBH_Hospitality
+ExecStart=/home/sadmin/AI_Voice_Bot_RBH_Hospitality/scripts/certbot-renew.sh
