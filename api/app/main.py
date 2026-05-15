@@ -418,7 +418,7 @@ RAINBOW_GUEST_CREDENTIALS: Dict[str, Dict[str, str]] = {
     "1911": {"username": "room1911@hotelaleapac.com", "password": "Rainbow@1911"},
     "1912": {"username": "room1912@hotelaleapac.com", "password": "Rainbow@1912"},
     "1913": {"username": "room1913@hotelaleapac.com", "password": "Rainbow@1913"},
-    "1913": {"username": "room1914@hotelaleapac.com", "password": "Rainbow@1914"}
+    "1914": {"username": "room1914@hotelaleapac.com", "password": "Rainbow@1914"}
 }
 
 def get_rainbow_credentials(room_number: str) -> Dict[str, str]:
