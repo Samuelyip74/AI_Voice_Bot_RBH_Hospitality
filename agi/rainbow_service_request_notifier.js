@@ -53,6 +53,10 @@ function optionsFromEnv() {
 }
 
 function formatMessage(payload) {
+  if (payload.message) {
+    return String(payload.message);
+  }
+
   const request = payload.request || {};
   const lines = [
     `New ${payload.destination || "hotel"} request`,

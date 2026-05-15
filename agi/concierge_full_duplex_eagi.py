@@ -31,6 +31,7 @@ from voice_assistant_eagi import (
     enrich_session_caller_details,
     finalize_transcript_email,
     normalize_transfer_extension,
+    notify_rainbow_transfer_transcript,
     parse_agi_env,
     synthesize_text_phrase,
     synthesize_transfer_phrase,
@@ -157,6 +158,21 @@ async def handle_action(session: CallSession, audiosocket_id: str) -> None:
         agi_stream_file(str(wav.with_suffix("")))
     except Exception:
         LOGGER.exception("Could not play full-duplex transfer phrase")
+    try:
+        refresh_session_history_from_log(session)
+        rainbow_transfer_result = await asyncio.to_thread(
+            notify_rainbow_transfer_transcript,
+            session,
+            transfer_type,
+            target_extension,
+        )
+        session.append_event("transfer_transcript_rainbow_result", rainbow_transfer_result)
+    except Exception as exc:
+        LOGGER.exception("Could not send full-duplex transfer transcript to Rainbow")
+        session.append_event(
+            "transfer_transcript_rainbow_error",
+            {"error": str(exc), "transfer_type": transfer_type, "extension": target_extension},
+        )
     agi_exec("Transfer", transfer_target_for_extension(target_extension))
 
 

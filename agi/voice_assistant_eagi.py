@@ -704,6 +704,111 @@ def notify_rainbow_service_request(session: CallSession, payload: dict) -> dict:
     return result
 
 
+def rainbow_transfer_destination(transfer_type: str | None) -> tuple[str, str]:
+    normalized = (transfer_type or "").strip().lower()
+    if normalized == "room_service":
+        return "room_service", os.getenv("RAINBOW_ROOM_SERVICE_BUBBLE_JID", "").strip()
+    return "front_desk", os.getenv("RAINBOW_FRONT_DESK_BUBBLE_JID", "").strip()
+
+
+def notify_rainbow_transfer_transcript(session: CallSession, transfer_type: str | None, target_extension: str = "") -> dict:
+    enabled = os.getenv("RAINBOW_TRANSFER_TRANSCRIPT_ENABLED", "true").lower() == "true"
+    destination, bubble_jid = rainbow_transfer_destination(transfer_type)
+    max_chars = int(os.getenv("RAINBOW_TRANSFER_TRANSCRIPT_MAX_CHARS", "12000"))
+    transcript = transcript_text(session)
+    if max_chars > 0 and len(transcript) > max_chars:
+        transcript = "... transcript truncated ...\n" + transcript[-max_chars:]
+    message = "\n".join(
+        [
+            f"Call transfer to {destination}",
+            f"Target extension: {target_extension or 'unknown'}",
+            f"Room: {session.room_number or 'unknown'}",
+            f"Guest: {session.caller_name or 'unknown'}",
+            f"Call ID: {session.call_id}",
+            "",
+            transcript,
+        ]
+    ).strip()
+
+    payload = {
+        "call_id": session.call_id,
+        "caller_id": session.caller_id,
+        "caller_name": session.caller_name,
+        "caller_room_number": session.room_number,
+        "sip_from_header": session.sip_from_header,
+        "preferred_language": session.preferred_language,
+        "destination": destination,
+        "transfer_type": transfer_type or "",
+        "target_extension": target_extension,
+        "message": message,
+    }
+
+    if not enabled:
+        return {"sent": False, "reason": "RAINBOW_TRANSFER_TRANSCRIPT_ENABLED is false", "destination": destination, "payload": payload}
+    if not bubble_jid:
+        env_name = "RAINBOW_ROOM_SERVICE_BUBBLE_JID" if destination == "room_service" else "RAINBOW_FRONT_DESK_BUBBLE_JID"
+        return {"sent": False, "reason": f"{env_name} is not configured", "destination": destination, "payload": payload}
+
+    required_env = ["RAINBOW_LOGIN", "RAINBOW_PASSWORD", "RAINBOW_APP_ID", "RAINBOW_APP_SECRET"]
+    missing = [name for name in required_env if not os.getenv(name, "").strip()]
+    if missing:
+        return {"sent": False, "reason": f"Missing Rainbow SDK env vars: {', '.join(missing)}", "destination": destination, "payload": payload}
+
+    script = Path(os.getenv("RAINBOW_NODE_NOTIFIER_SCRIPT", Path(__file__).with_name("rainbow_service_request_notifier.js"))).resolve()
+    if not script.exists():
+        return {"sent": False, "reason": f"Rainbow notifier script not found: {script}", "destination": destination, "payload": payload}
+
+    node_payload = dict(payload)
+    node_payload["bubble_jid"] = bubble_jid
+    timeout = float(os.getenv("RAINBOW_TRANSFER_TRANSCRIPT_TIMEOUT_SECONDS", os.getenv("RAINBOW_NODE_TIMEOUT_SECONDS", "45")))
+    try:
+        completed = subprocess.run(
+            [os.getenv("RAINBOW_NODE_BIN", "node"), str(script)],
+            input=json.dumps(node_payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return {"sent": False, "reason": str(exc), "destination": destination, "payload": payload}
+    except subprocess.TimeoutExpired:
+        return {"sent": False, "reason": f"Rainbow transfer transcript notifier timed out after {timeout:g}s", "destination": destination, "payload": payload}
+
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    stdout_lines = [line for line in stdout.splitlines() if line.strip()]
+    parsed_stdout: dict[str, object] = {}
+    sdk_log_lines = stdout_lines
+    for index in range(len(stdout_lines) - 1, -1, -1):
+        candidate = stdout_lines[index].strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_stdout = parsed
+            sdk_log_lines = stdout_lines[:index] + stdout_lines[index + 1 :]
+            break
+
+    result = {
+        "sent": bool(parsed_stdout.get("sent", completed.returncode == 0)),
+        "destination": destination,
+        "bubble_jid": bubble_jid,
+        "message_id": parsed_stdout.get("message_id"),
+        "returncode": completed.returncode,
+        "stdout": json.dumps(parsed_stdout, ensure_ascii=False) if parsed_stdout else stdout[-4096:],
+        "sdk_log": "\n".join(sdk_log_lines)[-4096:],
+        "stderr": stderr[-4096:],
+        "payload": {key: value for key, value in payload.items() if key != "message"},
+    }
+    if completed.returncode != 0 and not stdout and stderr:
+        result["reason"] = stderr.splitlines()[-1]
+    return result
+
+
 def append_rainbow_service_request_result(session: CallSession, payload: dict) -> None:
     try:
         result = notify_rainbow_service_request(session, payload)
@@ -1696,6 +1801,20 @@ async def run_call() -> int:
                         break
                 except Exception:
                     LOGGER.exception("Could not synthesize transfer phrase")
+                try:
+                    rainbow_transfer_result = await asyncio.to_thread(
+                        notify_rainbow_transfer_transcript,
+                        session,
+                        transfer_type,
+                        target_extension,
+                    )
+                    session.append_event("transfer_transcript_rainbow_result", rainbow_transfer_result)
+                except Exception as exc:
+                    LOGGER.exception("Could not send transfer transcript to Rainbow")
+                    session.append_event(
+                        "transfer_transcript_rainbow_error",
+                        {"error": str(exc), "transfer_type": transfer_type, "extension": target_extension},
+                    )
                 transfer_target = transfer_target_for_extension(target_extension)
                 transfer_response = agi_exec("Transfer", transfer_target)
                 transfer_status = agi_get_variable("TRANSFERSTATUS")
