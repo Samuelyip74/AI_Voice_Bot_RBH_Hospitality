@@ -72,8 +72,14 @@ services:
              export ASTERISK_LOCAL_NET=$${ASTERISK_LOCAL_NET:-192.168.0.0/24};
              envsubst '$$ASTERISK_EXTERNAL_IP $$ASTERISK_LAN_IP $$ASTERISK_LOCAL_NET' < /etc/asterisk/pjsip.conf.template > /etc/asterisk/pjsip.conf;
              chmod +x /var/lib/asterisk/agi-bin/voice_assistant_eagi.py || true;
+             chmod +x /var/lib/asterisk/agi-bin/translation_bridge_eagi.py || true;
+             chmod +x /var/lib/asterisk/agi-bin/audiosocket_translation_server.py || true;
+             chmod +x /var/lib/asterisk/agi-bin/concierge_full_duplex_eagi.py || true;
+             chmod +x /var/lib/asterisk/agi-bin/audiosocket_concierge_server.py || true;
              mkdir -p /var/log/asterisk/cdr-csv /var/log/asterisk/ai/calls;
              chown -R asterisk:asterisk /var/lib/asterisk/sounds/ai /var/log/asterisk/ai /var/log/asterisk/cdr-csv || true;
+             python3 /var/lib/asterisk/agi-bin/audiosocket_translation_server.py >> /var/log/asterisk/ai/audiosocket_translation_server.log 2>&1 &
+             python3 /var/lib/asterisk/agi-bin/audiosocket_concierge_server.py >> /var/log/asterisk/ai/audiosocket_concierge_server.log 2>&1 &
              exec su -s /bin/sh asterisk -c 'asterisk -f -vvv'"
 
   freeradius:

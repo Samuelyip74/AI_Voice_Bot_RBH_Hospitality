@@ -80,7 +80,31 @@ ROOM_SERVICE_TRANSFER_EXTENSION=1921
 TRANSFER_TARGET_TEMPLATE=sip:{extension}@313.apac1.sip.openrainbow.com
 RECORD_AUDIO=false
 LOG_LEVEL=INFO
+OPENAI_TRANSCRIPTION_PREFLIGHT_TIMEOUT_SECONDS=2.0
 ```
+
+Optional live translation handoff:
+
+```env
+REALTIME_TRANSLATION_ENABLED=true
+OPENAI_REALTIME_TRANSLATION_MODEL=gpt-realtime-translate
+TRANSLATION_HANDOFF_EXTENSION=5010
+TRANSLATION_AUDIOSOCKET_PORT=9019
+TRANSLATION_AUDIOSOCKET_SERVICE=127.0.0.1:9019
+TRANSLATION_DEFAULT_TARGET_LANGUAGE=en
+```
+
+When enabled, the concierge can detect requests such as “start live translation” and hand the call to extension `5010`, which uses Asterisk `AudioSocket` to stream live call audio to `audiosocket_translation_server.py`. The server streams 24 kHz PCM to `gpt-realtime-translate` and writes translated 8 kHz PCM audio back to the channel. Extension `5012` keeps the older EAGI short-turn translation bridge as a fallback.
+
+Experimental full-duplex concierge:
+
+```env
+CONCIERGE_AUDIOSOCKET_PORT=9020
+CONCIERGE_AUDIOSOCKET_SERVICE=127.0.0.1:9020
+CONCIERGE_VAD_SILENCE_DURATION_MS=650
+```
+
+Extension `5020` starts `concierge_full_duplex_eagi.py`, which bootstraps caller metadata and then hands the live channel to `audiosocket_concierge_server.py`. The server streams caller audio continuously into `gpt-realtime`, streams assistant audio back in paced 20 ms frames, and writes action files for transfers or call endings.
 
 Do not commit `agi/.env`.
 

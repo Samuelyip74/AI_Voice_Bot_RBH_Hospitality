@@ -16,6 +16,7 @@ import json
 import smtplib
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -43,6 +44,7 @@ from call_session import (
     should_transfer_deterministic,
 )
 from openai_realtime_client import OpenAIRealtimeClient
+from openai_realtime_translation_client import detect_translation_request
 
 
 load_dotenv("/var/lib/asterisk/agi-bin/.env", override=True)
@@ -145,6 +147,19 @@ STILL_THERE_PHRASES = {
     "id": "Apakah Anda masih di sana? Silakan beri tahu saya bagaimana saya bisa membantu.",
 }
 
+TRANSLATION_HANDOFF_PHRASES = {
+    "en": "Of course. I will start live translation now. Please speak one sentence at a time.",
+    "zh": "当然可以。我现在为您开启实时翻译。请一次说一句。",
+    "zh-yue": "當然可以。我而家為你開啟即時翻譯。請一句一句講。",
+    "ms": "Sudah tentu. Saya akan mulakan terjemahan langsung sekarang. Sila bercakap satu ayat pada satu masa.",
+    "ta": "நிச்சயமாக. நான் இப்போது நேரடி மொழிபெயர்ப்பை தொடங்குகிறேன். தயவுசெய்து ஒரு நேரத்தில் ஒரு வாக்கியம் பேசுங்கள்.",
+    "ja": "かしこまりました。これからライブ翻訳を開始します。一文ずつお話しください。",
+    "ko": "물론입니다. 지금 실시간 번역을 시작하겠습니다. 한 문장씩 말씀해 주세요.",
+    "th": "ได้ค่ะ ฉันจะเริ่มแปลสดให้ตอนนี้ กรุณาพูดทีละประโยค",
+    "vi": "Dạ được. Tôi sẽ bắt đầu phiên dịch trực tiếp ngay bây giờ. Xin vui lòng nói từng câu một.",
+    "id": "Tentu. Saya akan memulai terjemahan langsung sekarang. Mohon berbicara satu kalimat setiap kali.",
+}
+
 
 DEFAULT_GREETING_TEXT = "Hello, this is the AI assistant. How can I help you today?"
 DEFAULT_PERSONAL_GREETING_TEXT = "Hello {caller_name}, my name is Nova, your personal AI Voicebot. How can I help you today?"
@@ -212,8 +227,17 @@ def agi_goto(context: str, extension: str, priority: int = 1) -> str:
     return agi_command(f"SET CONTEXT {context}") + " | " + agi_command(f"SET EXTENSION {extension}") + " | " + agi_command(f"SET PRIORITY {priority}")
 
 
+def agi_exec_goto(context: str, extension: str, priority: int = 1) -> str:
+    return agi_exec("Goto", f"{context},{extension},{priority}")
+
+
 def agi_get_variable(name: str) -> str:
     return agi_command(f"GET VARIABLE {name}")
+
+
+def agi_set_variable(name: str, value: str) -> str:
+    safe_value = value.replace('"', "'")
+    return agi_command(f'SET VARIABLE {name} "{safe_value}"')
 
 
 def agi_variable_value(response: str) -> str:
@@ -452,6 +476,24 @@ def build_hotel_request_body(session: CallSession, payload: dict) -> dict:
         "request": payload,
         "submitted_at": time.time(),
     }
+
+
+def write_translation_target_file(translation_id: str, action: dict, session: CallSession) -> Path:
+    target_dir = Path(os.getenv("TRANSLATION_TARGET_DIR", "/var/log/asterisk/ai/translation_targets"))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{translation_id}.json"
+    body = {
+        "translation_id": translation_id,
+        "target_language": action.get("target_language", os.getenv("TRANSLATION_DEFAULT_TARGET_LANGUAGE", "en")),
+        "target_language_name": action.get("target_language_name", ""),
+        "call_id": session.call_id,
+        "caller_id": session.caller_id,
+        "caller_name": session.caller_name,
+        "room_number": session.room_number,
+        "created_at": time.time(),
+    }
+    target.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    return target
 
 
 def apply_known_room_number(session: CallSession, payload: dict | None) -> dict | None:
@@ -936,6 +978,11 @@ CONFIRMATION_TEXT_PATTERNS.extend(
         "\u662f\u7684",
         "\u597d\u7684",
         "\u597d",
+        "\u63d0\u4ea4",
+        "\u9001\u51fa",
+        "\u5b89\u6392",
+        "\u5e6b\u6211\u5b8c\u6210",
+        "\u5e2e\u6211\u5b8c\u6210",
     ]
 )
 
@@ -1167,6 +1214,11 @@ async def run_call() -> int:
     source_rate = int(os.getenv("ASTERISK_EAGI_SAMPLE_RATE", "8000"))
     enable_ready_tone = os.getenv("ENABLE_READY_TONE", "false").lower() == "true"
     enable_ai_greeting = os.getenv("ENABLE_AI_GREETING", "true").lower() == "true"
+    translation_handoff_enabled = os.getenv("REALTIME_TRANSLATION_ENABLED", "false").lower() == "true"
+    translation_handoff_context = os.getenv("TRANSLATION_HANDOFF_CONTEXT", "internal")
+    translation_handoff_extension = os.getenv("TRANSLATION_HANDOFF_EXTENSION", "5010")
+    translation_audiosocket_service = os.getenv("TRANSLATION_AUDIOSOCKET_SERVICE", "127.0.0.1:9019")
+    translation_default_target = os.getenv("TRANSLATION_DEFAULT_TARGET_LANGUAGE", "en")
     no_audio_max_turns = int(os.getenv("NO_AUDIO_MAX_TURNS", "20"))
     silence_prompt_after_turns = int(os.getenv("SILENCE_PROMPT_AFTER_TURNS", "2"))
     max_silence_prompts = int(os.getenv("MAX_SILENCE_PROMPTS", "2"))
@@ -1358,6 +1410,58 @@ async def run_call() -> int:
             session.append_event("assistant", {"role": "assistant", "text": result.response_text})
             if result.error:
                 session.append_event("openai_response_error", {"turn": turn, "error": result.error})
+
+            translation_action = detect_translation_request(result.transcript, translation_default_target)
+            if translation_action:
+                session.append_event("translation_action_detected", translation_action)
+                if translation_handoff_enabled:
+                    phrase = TRANSLATION_HANDOFF_PHRASES.get(session.preferred_language, TRANSLATION_HANDOFF_PHRASES["en"])
+                    try:
+                        translation_wav = await synthesize_cached_phrase(
+                            client,
+                            session,
+                            phrase,
+                            sounds_dir,
+                            "translation_handoff",
+                        )
+                        playback_response = agi_stream_file(str(translation_wav.with_suffix("")))
+                        session.append_event(
+                            "translation_handoff_prompt_played",
+                            {"turn": turn, "file": str(translation_wav), "text": phrase, "agi_response": playback_response},
+                        )
+                        if agi_response_is_dead_channel(playback_response):
+                            session.append_event("hangup", {"reason": "dead channel during translation handoff prompt"})
+                            break
+                    except Exception as exc:
+                        LOGGER.exception("Could not synthesize translation handoff phrase")
+                        session.append_event("translation_handoff_prompt_error", {"error": str(exc)})
+                    translation_id = str(uuid.uuid4())
+                    target_file = write_translation_target_file(translation_id, translation_action, session)
+                    uuid_response = agi_set_variable("AUDIOSOCKET_UUID", translation_id)
+                    variable_response = agi_set_variable("TRANSLATION_TARGET_LANGUAGE", translation_action["target_language"])
+                    if translation_handoff_extension == "5010":
+                        handoff_response = agi_exec("AudioSocket", f"{translation_id},{translation_audiosocket_service}")
+                    else:
+                        handoff_response = agi_exec_goto(translation_handoff_context, translation_handoff_extension, 1)
+                    session.append_event(
+                        "translation_handoff_requested",
+                        {
+                            "context": translation_handoff_context,
+                            "extension": translation_handoff_extension,
+                            "audiosocket_service": translation_audiosocket_service,
+                            "translation_id": translation_id,
+                            "target_language": translation_action["target_language"],
+                            "target_file": str(target_file),
+                            "uuid_response": uuid_response,
+                            "variable_response": variable_response,
+                            "response": handoff_response,
+                        },
+                    )
+                    break
+                session.append_event(
+                    "translation_handoff_disabled",
+                    {"reason": "REALTIME_TRANSLATION_ENABLED is false"},
+                )
 
             deterministic_action = determine_transfer_action(
                 result.transcript,
@@ -1642,7 +1746,10 @@ async def run_call() -> int:
     finalize_transcript_email(session)
 
     try:
-        if not (session.history and session.history[-1].get("type") == "transfer_reclaim_requested"):
+        if not (
+            session.history
+            and session.history[-1].get("type") in {"transfer_reclaim_requested", "translation_handoff_requested"}
+        ):
             agi_hangup()
     except Exception:
         LOGGER.debug("Could not send AGI HANGUP after call ended", exc_info=True)

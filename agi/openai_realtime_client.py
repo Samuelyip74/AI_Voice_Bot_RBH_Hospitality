@@ -374,8 +374,10 @@ class OpenAIRealtimeClient:
         ws: Any,
         session: CallSession,
         result: RealtimeTurnResult,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float | None = None,
     ) -> list[dict[str, Any]]:
+        if timeout_seconds is None:
+            timeout_seconds = float(os.getenv("OPENAI_TRANSCRIPTION_PREFLIGHT_TIMEOUT_SECONDS", "2.0"))
         buffered_events: list[dict[str, Any]] = []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
