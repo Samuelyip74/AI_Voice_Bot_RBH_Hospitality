@@ -6,6 +6,7 @@ import select
 import struct
 import time
 import wave
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -62,6 +63,37 @@ def resample_pcm16(pcm16: bytes, from_rate: int, to_rate: int) -> bytes:
         value = int(samples[left] * (1.0 - fraction) + samples[right] * fraction)
         converted.extend(struct.pack("<h", max(-32768, min(32767, value))))
     return bytes(converted)
+
+
+class Pcm16Resampler:
+    """Stateful mono PCM16 resampler for live chunked streams."""
+
+    def __init__(self, from_rate: int, to_rate: int) -> None:
+        self.from_rate = from_rate
+        self.to_rate = to_rate
+        self._state = None
+        self._audioop = None
+        with suppress(Exception):
+            import audioop
+
+            self._audioop = audioop
+
+    def process(self, pcm16: bytes) -> bytes:
+        if self.from_rate == self.to_rate:
+            return pcm16
+        if not pcm16:
+            return b""
+        if self._audioop is None:
+            return resample_pcm16(pcm16, self.from_rate, self.to_rate)
+        converted, self._state = self._audioop.ratecv(
+            pcm16,
+            SAMPLE_WIDTH,
+            CHANNELS,
+            self.from_rate,
+            self.to_rate,
+            self._state,
+        )
+        return converted
 
 
 def rms_dbfs(pcm16: bytes) -> float:

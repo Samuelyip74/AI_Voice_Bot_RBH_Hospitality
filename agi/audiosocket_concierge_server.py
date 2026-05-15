@@ -24,7 +24,7 @@ from audiosocket_translation_server import (
     read_audiosocket_packet,
     write_audiosocket_packet,
 )
-from audio_utils import OPENAI_PCM_RATE, resample_pcm16
+from audio_utils import OPENAI_PCM_RATE, Pcm16Resampler
 from call_session import CallSession, detect_language_from_text
 from openai_realtime_client import (
     ASSISTANT_INSTRUCTIONS,
@@ -70,6 +70,8 @@ class AudioSocketConciergeSession:
         self.call_uuid = "unknown"
         self.input_rate = 8000
         self.output_rate = 8000
+        self.input_resampler = Pcm16Resampler(self.input_rate, OPENAI_PCM_RATE)
+        self.output_resampler = Pcm16Resampler(OPENAI_PCM_RATE, self.output_rate)
         self.output_frame_bytes = int(os.getenv("CONCIERGE_OUTPUT_FRAME_BYTES", "320"))
         self.output_pacing_enabled = os.getenv("CONCIERGE_OUTPUT_PACING", "true").lower() == "true"
         self.output_queue: asyncio.Queue[bytes] = asyncio.Queue(
@@ -228,7 +230,7 @@ class AudioSocketConciergeSession:
                             input_start_delay_ms,
                         )
                         dropped_startup_packets = 0
-                    pcm24k = resample_pcm16(payload, self.input_rate, OPENAI_PCM_RATE)
+                    pcm24k = self.input_resampler.process(payload)
                     await ws.send(
                         json.dumps(
                             {
@@ -258,7 +260,7 @@ class AudioSocketConciergeSession:
                 event_type = event.get("type", "")
                 if event_type in {"response.audio.delta", "response.output_audio.delta"}:
                     pcm24k = base64.b64decode(event.get("delta", ""))
-                    pcm8k = resample_pcm16(pcm24k, OPENAI_PCM_RATE, self.output_rate)
+                    pcm8k = self.output_resampler.process(pcm24k)
                     self.audio_deltas_out += 1
                     self.audio_bytes_out += len(pcm8k)
                     if self.audio_deltas_out == 1 or self.audio_deltas_out % 20 == 0:

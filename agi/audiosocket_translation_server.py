@@ -14,7 +14,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from audio_utils import OPENAI_PCM_RATE, resample_pcm16
+from audio_utils import OPENAI_PCM_RATE, Pcm16Resampler
 from openai_realtime_translation_client import (
     REALTIME_TRANSLATION_URL,
     OpenAIRealtimeTranslationClient,
@@ -83,6 +83,8 @@ class AudioSocketTranslationSession:
         )
         self.input_rate = 8000
         self.output_rate = 8000
+        self.input_resampler = Pcm16Resampler(self.input_rate, OPENAI_PCM_RATE)
+        self.output_resampler = Pcm16Resampler(OPENAI_PCM_RATE, self.output_rate)
         self.output_frame_bytes = int(os.getenv("TRANSLATION_OUTPUT_FRAME_BYTES", "320"))
         self.output_pacing_enabled = os.getenv("TRANSLATION_OUTPUT_PACING", "true").lower() == "true"
         self.client = OpenAIRealtimeTranslationClient()
@@ -158,7 +160,7 @@ class AudioSocketTranslationSession:
                             self.audio_packets_in,
                             self.audio_bytes_in,
                         )
-                    pcm24k = resample_pcm16(payload, self.input_rate, OPENAI_PCM_RATE)
+                    pcm24k = self.input_resampler.process(payload)
                     await ws.send(
                         json.dumps(
                             {
@@ -200,7 +202,7 @@ class AudioSocketTranslationSession:
                     pcm24k = base64.b64decode(event.get("delta", ""))
                     if not pcm24k:
                         continue
-                    pcm8k = resample_pcm16(pcm24k, OPENAI_PCM_RATE, self.output_rate)
+                    pcm8k = self.output_resampler.process(pcm24k)
                     self.audio_deltas_out += 1
                     self.audio_bytes_out += len(pcm8k)
                     if self.audio_deltas_out == 1 or self.audio_deltas_out % 20 == 0:
