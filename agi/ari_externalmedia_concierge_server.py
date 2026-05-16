@@ -41,6 +41,7 @@ from voice_assistant_eagi import (
     service_request_can_be_submitted,
     submit_service_request_notifications,
     transcript_confirms_service_request,
+    transfer_target_for_extension,
 )
 
 
@@ -60,7 +61,6 @@ ARI_RTP_PORT_START = int(os.getenv("ARI_EXTERNALMEDIA_RTP_PORT_START", "12000"))
 ARI_RTP_PORT_END = int(os.getenv("ARI_EXTERNALMEDIA_RTP_PORT_END", "12099"))
 ARI_EXTERNAL_FORMAT = os.getenv("ARI_EXTERNALMEDIA_FORMAT", "slin16")
 ARI_EXTERNAL_TRANSPORT = os.getenv("ARI_EXTERNALMEDIA_TRANSPORT", "websocket").strip().lower()
-ARI_TRANSFER_ENDPOINT_TEMPLATE = os.getenv("ARI_TRANSFER_ENDPOINT_TEMPLATE", "PJSIP/{extension}@rainbow-trunk")
 RTP_SAMPLE_RATE = int(os.getenv("ARI_RTP_SAMPLE_RATE", "16000"))
 RTP_FRAME_BYTES = int(os.getenv("ARI_RTP_FRAME_BYTES", str(int(RTP_SAMPLE_RATE * 20 / 1000) * 2)))
 RTP_FRAME_SAMPLES = RTP_FRAME_BYTES // 2
@@ -687,13 +687,43 @@ class AriExternalMediaConcierge:
             call.session.append_event("transfer_transcript_rainbow_result", result)
         except Exception as exc:
             call.session.append_event("transfer_transcript_rainbow_error", {"error": str(exc)})
-        endpoint = ARI_TRANSFER_ENDPOINT_TEMPLATE.format(extension=extension)
+        transfer_target = transfer_target_for_extension(extension)
         try:
-            await asyncio.to_thread(ari_request, "POST", f"/channels/{call.channel_id}/redirect", {"endpoint": endpoint})
-            call.session.append_event("transfer_result", {"extension": extension, "target": endpoint, "status": "redirected"})
+            await asyncio.to_thread(
+                ari_request,
+                "POST",
+                f"/channels/{call.channel_id}/variable",
+                {
+                    "variable": "AI_TRANSFER_TARGET",
+                    "value": transfer_target,
+                },
+            )
+            await asyncio.to_thread(
+                ari_request,
+                "POST",
+                f"/channels/{call.channel_id}/variable",
+                {
+                    "variable": "AI_TRANSFER_EXTENSION",
+                    "value": extension,
+                },
+            )
+            await asyncio.to_thread(
+                ari_request,
+                "POST",
+                f"/channels/{call.channel_id}/continue",
+                {
+                    "context": "ari-sip-transfer",
+                    "extension": "refer",
+                    "priority": 1,
+                },
+            )
+            call.session.append_event(
+                "transfer_result",
+                {"extension": extension, "target": transfer_target, "status": "refer_requested"},
+            )
         except Exception as exc:
-            call.session.append_event("transfer_result", {"extension": extension, "target": endpoint, "status": "failed", "error": str(exc)})
-        await self.close_call(call, "transfer requested")
+            call.session.append_event("transfer_result", {"extension": extension, "target": transfer_target, "status": "failed", "error": str(exc)})
+            await self.close_call(call, "transfer failed")
 
     async def hangup_call(self, call: AriCallSession, reason: str) -> None:
         call.session.append_event("call_closing", {"reason": reason})
