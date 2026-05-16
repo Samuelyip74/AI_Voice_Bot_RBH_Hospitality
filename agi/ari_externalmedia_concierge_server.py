@@ -29,10 +29,12 @@ from openai_realtime_client import (
     REALTIME_URL,
     SUBMIT_HOTEL_REQUEST_TOOL,
     TRANSFER_TOOL,
+    build_prior_call_context,
 )
 from voice_assistant_eagi import (
     apply_known_room_number,
     build_greeting_text,
+    extract_room_number_from_caller_identity,
     finalize_transcript_email,
     latest_unsubmitted_pending_service_request,
     notify_rainbow_transfer_transcript,
@@ -302,7 +304,12 @@ class AriExternalMediaConcierge:
         caller_name = str(channel.get("caller", {}).get("name") or "")
         call = AriCallSession(channel_id=channel_id, call_id=call_id, channel_name=str(channel.get("name") or ""))
         call.session = CallSession(call_id=re_safe(channel_id), caller_id=call_id, caller_name=caller_name, preferred_language=os.getenv("DEFAULT_LANGUAGE", "en"))
+        call.session.room_number = extract_room_number_from_caller_identity(caller_name, call_id)
         call.session.append_event("ari_concierge_started", {"channel_id": channel_id, "format": ARI_EXTERNAL_FORMAT, "transport": ARI_EXTERNAL_TRANSPORT})
+        call.session.append_event(
+            "caller_identity_detected",
+            {"caller_id": call.session.caller_id, "caller_name": call.session.caller_name, "room_number": call.session.room_number},
+        )
         self.calls[channel_id] = call
         if ARI_EXTERNAL_TRANSPORT == "udp":
             call.rtp_port = self.allocate_port()
@@ -449,14 +456,21 @@ class AriExternalMediaConcierge:
         elif event.get("event"):
             call.session.append_event("ari_media_websocket_event", {"event": event.get("event")})
 
-    def session_update_payload(self) -> dict[str, Any]:
+    def session_update_payload(self, session: CallSession) -> dict[str, Any]:
         audio_format = openai_audio_format()
+        instructions = ASSISTANT_INSTRUCTIONS
+        if session.room_number:
+            instructions += (
+                f"\n\nKnown caller room number is {session.room_number}. "
+                "Use this room number for hotel service requests. Do not ask for the room number again "
+                "unless the guest says it is wrong or gives a different room number."
+            )
         return {
             "type": "session.update",
             "session": {
                 "type": "realtime",
                 "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
-                "instructions": ASSISTANT_INSTRUCTIONS,
+                "instructions": instructions,
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
@@ -489,7 +503,19 @@ class AriExternalMediaConcierge:
         try:
             async with websockets.connect(url, additional_headers=headers, max_size=20 * 1024 * 1024) as ws:
                 call.openai_ws = ws
-                await ws.send(json.dumps(self.session_update_payload()))
+                await ws.send(json.dumps(self.session_update_payload(call.session)))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "system",
+                                "content": [{"type": "input_text", "text": f"Current call context:\n{build_prior_call_context(call.session)}"}],
+                            },
+                        }
+                    )
+                )
                 greeting_text, _personalized = build_greeting_text(call.session)
                 await ws.send(json.dumps({"type": "response.create", "response": {"output_modalities": ["audio"], "instructions": greeting_text}}))
                 if ARI_EXTERNAL_TRANSPORT == "websocket":
@@ -682,6 +708,7 @@ class AriExternalMediaConcierge:
             transfer_extension = os.getenv("ROOM_SERVICE_TRANSFER_EXTENSION", "1921")
         extension = str(action.get("extension") or transfer_extension)
         call.session.append_event("transfer_requested", {"reason": action.get("reason", "transfer requested"), "extension": extension, "transfer_type": action.get("transfer_type", "human")})
+        await self.say_transfer_goodbye(call, action.get("transfer_type", "human"))
         try:
             result = await asyncio.to_thread(notify_rainbow_transfer_transcript, call.session, action.get("transfer_type", "human"), extension)
             call.session.append_event("transfer_transcript_rainbow_result", result)
@@ -724,6 +751,42 @@ class AriExternalMediaConcierge:
         except Exception as exc:
             call.session.append_event("transfer_result", {"extension": extension, "target": transfer_target, "status": "failed", "error": str(exc)})
             await self.close_call(call, "transfer failed")
+
+    async def say_transfer_goodbye(self, call: AriCallSession, transfer_type: str | None) -> None:
+        if call.openai_ws is None:
+            return
+        destination = "front desk"
+        if transfer_type == "room_service":
+            destination = "room service"
+        elif transfer_type == "room":
+            destination = "the room"
+        text = f"Of course. I will transfer your call to {destination} now. Thank you for calling, and goodbye."
+        call.session.append_event("transfer_goodbye_requested", {"text": text, "transfer_type": transfer_type or "human"})
+        await call.openai_ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": (
+                            f"Say exactly this sentence and do not call any tools: {text}"
+                        ),
+                    },
+                }
+            )
+        )
+        await self.wait_for_output_drain(call, timeout=float(os.getenv("ARI_TRANSFER_GOODBYE_TIMEOUT_SECONDS", "8")))
+
+    async def wait_for_output_drain(self, call: AriCallSession, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if call.output_queue.empty() and not call.output_media_buffer:
+                await asyncio.sleep(0.4)
+                if call.output_queue.empty() and not call.output_media_buffer:
+                    call.session.append_event("transfer_goodbye_played", {"waited_seconds": round(timeout - max(0.0, deadline - time.monotonic()), 2)})
+                    return
+            await asyncio.sleep(0.05)
+        call.session.append_event("transfer_goodbye_timeout", {"timeout_seconds": timeout})
 
     async def hangup_call(self, call: AriCallSession, reason: str) -> None:
         call.session.append_event("call_closing", {"reason": reason})
