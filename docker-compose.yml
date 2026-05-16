@@ -61,6 +61,8 @@ services:
       - ./asterisk/pjsip.conf.template:/etc/asterisk/pjsip.conf.template:ro
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
       - ./asterisk/modules.conf:/etc/asterisk/modules.conf:ro
+      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/ari.conf:/etc/asterisk/ari.conf:ro
       - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
       - ./asterisk/certs:/etc/asterisk/certs:ro
       - ./agi:/var/lib/asterisk/agi-bin
@@ -76,10 +78,12 @@ services:
              chmod +x /var/lib/asterisk/agi-bin/audiosocket_translation_server.py || true;
              chmod +x /var/lib/asterisk/agi-bin/concierge_full_duplex_eagi.py || true;
              chmod +x /var/lib/asterisk/agi-bin/audiosocket_concierge_server.py || true;
+             chmod +x /var/lib/asterisk/agi-bin/ari_externalmedia_concierge_server.py || true;
              mkdir -p /var/log/asterisk/cdr-csv /var/log/asterisk/ai/calls;
              chown -R asterisk:asterisk /var/lib/asterisk/sounds/ai /var/log/asterisk/ai /var/log/asterisk/cdr-csv || true;
              python3 /var/lib/asterisk/agi-bin/audiosocket_translation_server.py >> /var/log/asterisk/ai/audiosocket_translation_server.log 2>&1 &
              python3 /var/lib/asterisk/agi-bin/audiosocket_concierge_server.py >> /var/log/asterisk/ai/audiosocket_concierge_server.log 2>&1 &
+             python3 /var/lib/asterisk/agi-bin/ari_externalmedia_concierge_server.py >> /var/log/asterisk/ai/ari_externalmedia_concierge_server.log 2>&1 &
              exec su -s /bin/sh asterisk -c 'asterisk -f -vvv'"
 
   freeradius:

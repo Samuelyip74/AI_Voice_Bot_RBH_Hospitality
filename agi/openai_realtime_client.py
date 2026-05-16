@@ -475,7 +475,7 @@ class OpenAIRealtimeClient:
                     },
                     "output": {
                         "format": {"type": "audio/pcm", "rate": 24000},
-                        "voice": "marin",
+                        "voice": os.getenv("OPENAI_REALTIME_VOICE", "marin"),
                     },
                 },
                 "tools": [TRANSFER_TOOL, SUBMIT_HOTEL_REQUEST_TOOL, END_CALL_TOOL],
