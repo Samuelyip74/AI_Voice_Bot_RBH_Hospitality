@@ -16,8 +16,10 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -67,6 +69,10 @@ RTP_SAMPLE_RATE = int(os.getenv("ARI_RTP_SAMPLE_RATE", "16000"))
 RTP_FRAME_BYTES = int(os.getenv("ARI_RTP_FRAME_BYTES", str(int(RTP_SAMPLE_RATE * 20 / 1000) * 2)))
 RTP_FRAME_SAMPLES = RTP_FRAME_BYTES // 2
 ARI_MEDIA_WEBSOCKET_PACE_OUTPUT = os.getenv("ARI_MEDIA_WEBSOCKET_PACE_OUTPUT", "true").strip().lower() in {"1", "true", "yes", "on"}
+ARI_OPENAI_GREETING_DELAY_MS = int(os.getenv("ARI_OPENAI_GREETING_DELAY_MS", "350"))
+ARI_POST_ANSWER_MEDIA_DELAY_MS = int(os.getenv("ARI_POST_ANSWER_MEDIA_DELAY_MS", "700"))
+ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS = float(os.getenv("ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS", "18"))
+ARI_END_CALL_POST_PLAYBACK_HOLD_SECONDS = float(os.getenv("ARI_END_CALL_POST_PLAYBACK_HOLD_SECONDS", "1.5"))
 
 
 def openai_audio_format() -> dict[str, Any]:
@@ -80,6 +86,51 @@ def openai_audio_format() -> dict[str, Any]:
 
 def uses_openai_g711() -> bool:
     return openai_audio_format()["type"] in {"audio/pcmu", "audio/pcma"}
+
+
+def input_noise_reduction_config() -> dict[str, str] | None:
+    value = os.getenv("OPENAI_REALTIME_NOISE_REDUCTION", "near_field").strip().lower()
+    if value in {"", "none", "null", "off", "false", "disabled"}:
+        return None
+    if value not in {"near_field", "far_field"}:
+        LOGGER.warning("Unsupported OPENAI_REALTIME_NOISE_REDUCTION=%s; using near_field", value)
+        value = "near_field"
+    return {"type": value}
+
+
+def turn_detection_config() -> dict[str, Any]:
+    vad_type = os.getenv("CONCIERGE_VAD_TYPE", "server_vad").strip().lower()
+    if vad_type == "semantic_vad":
+        return {
+            "type": "semantic_vad",
+            "eagerness": os.getenv("CONCIERGE_SEMANTIC_VAD_EAGERNESS", "low"),
+            "create_response": True,
+            "interrupt_response": True,
+        }
+    return {
+        "type": "server_vad",
+        "threshold": float(os.getenv("CONCIERGE_VAD_THRESHOLD", "0.62")),
+        "prefix_padding_ms": int(os.getenv("CONCIERGE_VAD_PREFIX_PADDING_MS", "250")),
+        "silence_duration_ms": int(os.getenv("CONCIERGE_VAD_SILENCE_DURATION_MS", "800")),
+        "create_response": True,
+        "interrupt_response": True,
+    }
+
+
+def hotel_datetime_hint() -> str:
+    timezone_name = os.getenv("HOTEL_TIMEZONE", "Asia/Singapore")
+    try:
+        now = datetime.now(ZoneInfo(timezone_name))
+    except Exception:
+        timezone_name = "local"
+        now = datetime.now().astimezone()
+    tomorrow = now.date().toordinal() + 1
+    tomorrow_date = datetime.fromordinal(tomorrow).date().isoformat()
+    return (
+        f"Hotel local datetime is {now.strftime('%Y-%m-%dT%H:%M:%S')} ({timezone_name}). "
+        f"If the guest says tomorrow, use date {tomorrow_date} in hotel local time. "
+        "For wake-up calls, never create an alarm_time in the past."
+    )
 
 
 def media_bytes_per_sample() -> int:
@@ -232,6 +283,10 @@ class AriCallSession:
     function_call_names: dict[str, str] = field(default_factory=dict)
     input_audio_bytes: int = 0
     output_audio_bytes: int = 0
+    last_hangup_event: dict[str, Any] | None = None
+    pending_end_call_reason: str | None = None
+    end_call_goodbye_requested: bool = False
+    no_response_task: asyncio.Task[Any] | None = None
 
     def __post_init__(self) -> None:
         self.media_can_send.set()
@@ -293,6 +348,18 @@ class AriExternalMediaConcierge:
             if channel_id in self.external_to_call or channel.get("name", "").startswith(("UnicastRTP", "External")):
                 return
             await self.start_call(channel, args)
+        elif event_type in {"ChannelHangupRequest", "ChannelDestroyed"} and channel_id:
+            call = self.calls.get(channel_id)
+            if call:
+                details = {
+                    "event": event_type,
+                    "cause": event.get("cause"),
+                    "cause_txt": event.get("cause_txt"),
+                    "soft": event.get("soft"),
+                    "channel_state": channel.get("state"),
+                }
+                call.last_hangup_event = details
+                call.session.append_event("ari_channel_hangup_event", details)
         elif event_type == "StasisEnd" and channel_id:
             call = self.calls.get(channel_id)
             if call:
@@ -318,6 +385,9 @@ class AriExternalMediaConcierge:
             call.rtp = protocol  # type: ignore[assignment]
         try:
             await asyncio.to_thread(ari_request, "POST", f"/channels/{channel_id}/answer")
+            if ARI_POST_ANSWER_MEDIA_DELAY_MS > 0:
+                await asyncio.sleep(ARI_POST_ANSWER_MEDIA_DELAY_MS / 1000)
+                call.session.append_event("ari_post_answer_media_delayed", {"duration_ms": ARI_POST_ANSWER_MEDIA_DELAY_MS})
             await asyncio.to_thread(ari_request, "POST", "/bridges", {"type": "mixing", "bridgeId": call.bridge_id, "name": call.bridge_id})
             await asyncio.to_thread(ari_request, "POST", f"/bridges/{call.bridge_id}/addChannel", {"channel": channel_id})
             if ARI_EXTERNAL_TRANSPORT == "websocket":
@@ -465,6 +535,7 @@ class AriExternalMediaConcierge:
                 "Use this room number for hotel service requests. Do not ask for the room number again "
                 "unless the guest says it is wrong or gives a different room number."
             )
+        instructions += f"\n\n{hotel_datetime_hint()}"
         return {
             "type": "session.update",
             "session": {
@@ -475,15 +546,9 @@ class AriExternalMediaConcierge:
                 "audio": {
                     "input": {
                         "format": audio_format,
+                        "noise_reduction": input_noise_reduction_config(),
                         "transcription": {"model": os.getenv("OPENAI_REALTIME_TRANSCRIPTION_MODEL", "gpt-4o-transcribe")},
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": float(os.getenv("CONCIERGE_VAD_THRESHOLD", "0.55")),
-                            "prefix_padding_ms": int(os.getenv("CONCIERGE_VAD_PREFIX_PADDING_MS", "300")),
-                            "silence_duration_ms": int(os.getenv("CONCIERGE_VAD_SILENCE_DURATION_MS", "650")),
-                            "create_response": True,
-                            "interrupt_response": True,
-                        },
+                        "turn_detection": turn_detection_config(),
                     },
                     "output": {
                         "format": audio_format,
@@ -517,6 +582,8 @@ class AriExternalMediaConcierge:
                     )
                 )
                 greeting_text, _personalized = build_greeting_text(call.session)
+                if ARI_EXTERNAL_TRANSPORT == "websocket":
+                    await self.wait_before_initial_greeting(call)
                 await ws.send(json.dumps({"type": "response.create", "response": {"output_modalities": ["audio"], "instructions": greeting_text}}))
                 if ARI_EXTERNAL_TRANSPORT == "websocket":
                     await asyncio.gather(self.openai_to_rtp(call, ws), self.websocket_playout(call))
@@ -538,10 +605,12 @@ class AriExternalMediaConcierge:
                 call.output_audio_bytes += len(audio)
                 await self.queue_output(call, audio if uses_openai_g711() else call.output_resampler.process(audio))
             elif event_type in {"input_audio_buffer.speech_started", "conversation.input_audio_buffer.speech_started"}:
+                self.cancel_no_response_timer(call)
                 self.clear_output(call)
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 transcript = str(event.get("transcript") or "").strip()
                 if transcript:
+                    self.cancel_no_response_timer(call)
                     call.last_user_transcript = transcript
                     language, confidence = detect_language_from_text(transcript, call.session.preferred_language)
                     call.session.update_language(language, confidence, source="ari_externalmedia_transcription")
@@ -555,10 +624,18 @@ class AriExternalMediaConcierge:
             elif event_type in {"response.output_item.done", "conversation.item.created"}:
                 self.capture_tool_metadata(call, event)
             elif event_type == "response.done":
+                was_waiting_for_end_call_goodbye = bool(call.pending_end_call_reason and call.end_call_goodbye_requested)
+                had_assistant_text = bool(call.current_response_text.strip())
                 if call.current_response_text:
                     call.session.append_event("assistant", {"role": "assistant", "text": call.current_response_text})
                     call.current_response_text = ""
                 await self.handle_completed_tool_calls(call, ws)
+                if was_waiting_for_end_call_goodbye and call.pending_end_call_reason and call.end_call_goodbye_requested and not call.function_call_args:
+                    reason = call.pending_end_call_reason
+                    call.pending_end_call_reason = None
+                    asyncio.create_task(self.finish_end_call_after_goodbye(call, reason))
+                elif had_assistant_text and not call.pending_end_call_reason and not call.end_call_goodbye_requested and not call.function_call_args:
+                    self.schedule_no_response_timer(call, ws)
             elif event_type == "error":
                 call.session.append_event("openai_error", {"error": event.get("error", event)})
 
@@ -640,6 +717,17 @@ class AriExternalMediaConcierge:
             frame_seconds = max(0.005, len(chunk) / (RTP_SAMPLE_RATE * media_bytes_per_sample())) if RTP_SAMPLE_RATE > 0 else 0.02
             await asyncio.sleep(frame_seconds)
 
+    async def wait_before_initial_greeting(self, call: AriCallSession) -> None:
+        try:
+            await asyncio.wait_for(call.media_ready.wait(), timeout=float(os.getenv("ARI_MEDIA_WEBSOCKET_READY_TIMEOUT_SECONDS", "4")))
+        except asyncio.TimeoutError:
+            call.session.append_event("ari_initial_greeting_delay_skipped", {"reason": "media_start_timeout"})
+            return
+        if ARI_OPENAI_GREETING_DELAY_MS <= 0:
+            return
+        await asyncio.sleep(ARI_OPENAI_GREETING_DELAY_MS / 1000)
+        call.session.append_event("ari_initial_greeting_delayed", {"duration_ms": ARI_OPENAI_GREETING_DELAY_MS})
+
     def capture_tool_metadata(self, call: AriCallSession, event: dict[str, Any]) -> None:
         item = event.get("item") or {}
         if not isinstance(item, dict):
@@ -659,7 +747,7 @@ class AriExternalMediaConcierge:
             if name == "transfer_to_extension" or parsed.get("action") == "transfer":
                 await self.transfer_call(call, parsed)
             elif name == "end_call" or parsed.get("action") == "end_call":
-                await self.hangup_call(call, parsed.get("reason", "guest ended the call"))
+                await self.request_end_call_goodbye(call, ws, parsed.get("reason", "guest ended the call"))
             elif name == "submit_hotel_request" or parsed.get("category"):
                 await self.handle_service_request(call, ws, call_id, parsed)
             call.function_call_args.pop(call_id, None)
@@ -691,12 +779,37 @@ class AriExternalMediaConcierge:
     async def submit_service_request(self, call: AriCallSession, payload: dict[str, Any], ws: Any, tool_call_id: str | None) -> None:
         submission, rainbow_submission = await submit_service_request_notifications(call.session, payload)
         call.session.append_event("service_request_submitted", submission)
+        wakeup_result: dict[str, Any] | None = None
         if (payload.get("category") or "").strip().lower() == "wake_up_call":
             wakeup_result = await asyncio.to_thread(post_wakeup_call_request, call.session, payload)
             call.session.append_event("wakeup_call_result", wakeup_result)
         call.session.append_event("service_request_rainbow_result", rainbow_submission)
+        submitted = bool(submission.get("sent"))
+        if wakeup_result is not None:
+            submitted = bool(wakeup_result.get("sent"))
         if tool_call_id:
-            await self.send_tool_output(ws, tool_call_id, {"submitted": bool(submission.get("sent")), "request": payload})
+            await self.send_tool_output(
+                ws,
+                tool_call_id,
+                {"submitted": submitted, "request": payload, "wakeup_result": wakeup_result},
+            )
+        if wakeup_result is not None and not wakeup_result.get("sent"):
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "response": {
+                            "output_modalities": ["audio"],
+                            "instructions": (
+                                "Tell the guest that you could not schedule the wake-up call automatically, "
+                                "but you have sent the details to the front desk team for manual follow-up. "
+                                "Do not say the wake-up call has been scheduled. Then ask if there is anything else."
+                            ),
+                        },
+                    }
+                )
+            )
+            return
         await ws.send(json.dumps({"type": "response.create", "response": {"output_modalities": ["audio"], "instructions": "Briefly tell the guest the request has been submitted, then ask if there is anything else."}}))
 
     async def send_tool_output(self, ws: Any, call_id: str, output: dict[str, Any]) -> None:
@@ -708,12 +821,9 @@ class AriExternalMediaConcierge:
             transfer_extension = os.getenv("ROOM_SERVICE_TRANSFER_EXTENSION", "1921")
         extension = str(action.get("extension") or transfer_extension)
         call.session.append_event("transfer_requested", {"reason": action.get("reason", "transfer requested"), "extension": extension, "transfer_type": action.get("transfer_type", "human")})
+        transcript_task = asyncio.create_task(self.notify_transfer_transcript(call, action.get("transfer_type", "human"), extension))
         await self.say_transfer_goodbye(call, action.get("transfer_type", "human"))
-        try:
-            result = await asyncio.to_thread(notify_rainbow_transfer_transcript, call.session, action.get("transfer_type", "human"), extension)
-            call.session.append_event("transfer_transcript_rainbow_result", result)
-        except Exception as exc:
-            call.session.append_event("transfer_transcript_rainbow_error", {"error": str(exc)})
+        await transcript_task
         transfer_target = transfer_target_for_extension(extension)
         try:
             await asyncio.to_thread(
@@ -752,9 +862,14 @@ class AriExternalMediaConcierge:
             call.session.append_event("transfer_result", {"extension": extension, "target": transfer_target, "status": "failed", "error": str(exc)})
             await self.close_call(call, "transfer failed")
 
+    async def notify_transfer_transcript(self, call: AriCallSession, transfer_type: str | None, extension: str) -> None:
+        try:
+            result = await asyncio.to_thread(notify_rainbow_transfer_transcript, call.session, transfer_type or "human", extension)
+            call.session.append_event("transfer_transcript_rainbow_result", result)
+        except Exception as exc:
+            call.session.append_event("transfer_transcript_rainbow_error", {"error": str(exc)})
+
     async def say_transfer_goodbye(self, call: AriCallSession, transfer_type: str | None) -> None:
-        if call.openai_ws is None:
-            return
         destination = "front desk"
         if transfer_type == "room_service":
             destination = "room service"
@@ -762,31 +877,190 @@ class AriExternalMediaConcierge:
             destination = "the room"
         text = f"Of course. I will transfer your call to {destination} now. Thank you for calling, and goodbye."
         call.session.append_event("transfer_goodbye_requested", {"text": text, "transfer_type": transfer_type or "human"})
-        await call.openai_ws.send(
-            json.dumps(
-                {
-                    "type": "response.create",
-                    "response": {
-                        "output_modalities": ["audio"],
-                        "instructions": (
-                            f"Say exactly this sentence and do not call any tools: {text}"
-                        ),
-                    },
-                }
+        audio = await self.synthesize_fixed_phrase_audio(text)
+        if audio:
+            call.session.append_event("assistant", {"role": "assistant", "text": text})
+            await self.queue_output(call, audio)
+            audio_seconds = len(audio) / (RTP_SAMPLE_RATE * media_bytes_per_sample()) if RTP_SAMPLE_RATE > 0 else 4.0
+            timeout = min(float(os.getenv("ARI_TRANSFER_GOODBYE_TIMEOUT_SECONDS", "7")), max(3.0, audio_seconds + 1.5))
+        elif call.openai_ws is not None:
+            await call.openai_ws.send(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "response": {
+                            "output_modalities": ["audio"],
+                            "instructions": f"Say exactly this sentence and do not call any tools: {text}",
+                        },
+                    }
+                )
             )
-        )
-        await self.wait_for_output_drain(call, timeout=float(os.getenv("ARI_TRANSFER_GOODBYE_TIMEOUT_SECONDS", "8")))
+            timeout = float(os.getenv("ARI_TRANSFER_GOODBYE_TIMEOUT_SECONDS", "7"))
+        else:
+            timeout = 0.0
+        if timeout > 0:
+            await self.wait_for_output_drain(call, timeout=timeout, label="transfer_goodbye")
+        hold_seconds = float(os.getenv("ARI_TRANSFER_POST_PLAYBACK_HOLD_SECONDS", "1.0"))
+        if hold_seconds > 0:
+            await asyncio.sleep(hold_seconds)
+            call.session.append_event("transfer_post_playback_hold", {"seconds": hold_seconds})
 
-    async def wait_for_output_drain(self, call: AriCallSession, timeout: float) -> None:
+    async def wait_for_output_drain(self, call: AriCallSession, timeout: float, label: str = "audio") -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if call.output_queue.empty() and not call.output_media_buffer:
                 await asyncio.sleep(0.4)
                 if call.output_queue.empty() and not call.output_media_buffer:
-                    call.session.append_event("transfer_goodbye_played", {"waited_seconds": round(timeout - max(0.0, deadline - time.monotonic()), 2)})
+                    call.session.append_event(f"{label}_played", {"waited_seconds": round(timeout - max(0.0, deadline - time.monotonic()), 2)})
                     return
             await asyncio.sleep(0.05)
-        call.session.append_event("transfer_goodbye_timeout", {"timeout_seconds": timeout})
+        call.session.append_event(f"{label}_timeout", {"timeout_seconds": timeout})
+
+    async def request_end_call_goodbye(self, call: AriCallSession, ws: Any, reason: str) -> None:
+        self.cancel_no_response_timer(call)
+        if call.end_call_goodbye_requested:
+            return
+        call.pending_end_call_reason = reason
+        call.end_call_goodbye_requested = True
+        text = os.getenv(
+            "ARI_END_CALL_GOODBYE_TEXT",
+            "You're very welcome. Thank you for calling, and have a pleasant day.",
+        )
+        call.session.append_event("end_call_goodbye_requested", {"reason": reason, "text": text})
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": f"Say exactly this sentence and do not call any tools: {text}",
+                    },
+                }
+            )
+        )
+
+    def schedule_no_response_timer(self, call: AriCallSession, ws: Any) -> None:
+        self.cancel_no_response_timer(call)
+        if ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS <= 0:
+            return
+        call.no_response_task = asyncio.create_task(self.end_call_after_no_response(call, ws))
+
+    def cancel_no_response_timer(self, call: AriCallSession) -> None:
+        if call.no_response_task and not call.no_response_task.done():
+            if call.no_response_task is not asyncio.current_task():
+                call.no_response_task.cancel()
+        call.no_response_task = None
+
+    async def end_call_after_no_response(self, call: AriCallSession, ws: Any) -> None:
+        try:
+            await self.wait_for_output_drain(call, timeout=float(os.getenv("ARI_NO_RESPONSE_AUDIO_DRAIN_TIMEOUT_SECONDS", "8")), label="no_response_pre_timeout_audio")
+            await asyncio.sleep(ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS)
+            if call.closed.is_set() or call.pending_end_call_reason or call.end_call_goodbye_requested:
+                return
+            reason = "guest did not respond"
+            text = os.getenv(
+                "ARI_NO_RESPONSE_GOODBYE_TEXT",
+                "I have not heard a response, so I will end the call for now. Thank you for calling, and have a pleasant day.",
+            )
+            call.session.append_event(
+                "no_response_timeout",
+                {"timeout_seconds": ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS, "text": text},
+            )
+            audio = await self.synthesize_fixed_phrase_audio(text)
+            if audio:
+                call.session.append_event("assistant", {"role": "assistant", "text": text})
+                await self.queue_output(call, audio)
+                await self.finish_end_call_after_goodbye(call, reason)
+            else:
+                await self.request_end_call_goodbye(call, ws, reason)
+        except asyncio.CancelledError:
+            call.session.append_event("no_response_timer_cancelled", {})
+        except Exception as exc:
+            call.session.append_event("no_response_timeout_error", {"error": str(exc)})
+
+    async def synthesize_fixed_phrase_audio(self, text: str) -> bytes:
+        import websockets
+
+        url = f"{REALTIME_URL}?model={os.getenv('OPENAI_REALTIME_MODEL', 'gpt-realtime')}"
+        headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
+        audio_format = openai_audio_format()
+        pcm = b""
+        async with websockets.connect(url, additional_headers=headers, max_size=20 * 1024 * 1024) as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
+                            "instructions": (
+                                "You are a text-to-speech voice for a hotel phone system. "
+                                "Speak only the provided phrase exactly. Do not use prior conversation context."
+                            ),
+                            "output_modalities": ["audio"],
+                            "audio": {
+                                "output": {
+                                    "format": audio_format,
+                                    "voice": os.getenv("OPENAI_REALTIME_VOICE", "marin"),
+                                },
+                            },
+                        },
+                    }
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"Speak this phrase exactly, with no additions: {text}",
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "response": {
+                            "output_modalities": ["audio"],
+                            "instructions": "Speak the phrase exactly as provided. Do not add or change words.",
+                        },
+                    }
+                )
+            )
+            while True:
+                event = json.loads(await ws.recv())
+                event_type = event.get("type", "")
+                if event_type in {"response.audio.delta", "response.output_audio.delta"}:
+                    pcm += base64.b64decode(event.get("delta", ""))
+                elif event_type == "response.done":
+                    break
+                elif event_type == "error":
+                    raise RuntimeError(f"OpenAI fixed phrase synthesis failed: {event.get('error', event)}")
+        if uses_openai_g711():
+            return pcm
+        return Pcm16Resampler(OPENAI_PCM_RATE, RTP_SAMPLE_RATE).process(pcm)
+
+    async def finish_end_call_after_goodbye(self, call: AriCallSession, reason: str) -> None:
+        self.cancel_no_response_timer(call)
+        call.session.append_event("end_call_goodbye_wait_started", {"reason": reason})
+        await self.wait_for_output_drain(
+            call,
+            timeout=float(os.getenv("ARI_END_CALL_GOODBYE_TIMEOUT_SECONDS", "14")),
+            label="end_call_goodbye",
+        )
+        if ARI_END_CALL_POST_PLAYBACK_HOLD_SECONDS > 0:
+            await asyncio.sleep(ARI_END_CALL_POST_PLAYBACK_HOLD_SECONDS)
+            call.session.append_event("end_call_post_playback_hold", {"seconds": ARI_END_CALL_POST_PLAYBACK_HOLD_SECONDS})
+        await self.hangup_call(call, reason)
 
     async def hangup_call(self, call: AriCallSession, reason: str) -> None:
         call.session.append_event("call_closing", {"reason": reason})
@@ -813,9 +1087,11 @@ class AriExternalMediaConcierge:
                 "output_audio_bytes": call.output_audio_bytes,
                 "rtp_packets_out": call.rtp_packets_out,
                 "rtp_bytes_out": call.rtp_bytes_out,
+                "last_hangup_event": call.last_hangup_event,
             },
         )
         finalize_transcript_email(call.session)
+        self.cancel_no_response_timer(call)
         with contextlib.suppress(Exception):
             if call.external_channel_id:
                 await asyncio.to_thread(ari_request, "DELETE", f"/channels/{call.external_channel_id}")

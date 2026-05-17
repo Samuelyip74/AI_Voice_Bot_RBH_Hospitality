@@ -460,6 +460,12 @@ class OpenAIRealtimeClient:
         return event_type
 
     async def _send_session_update(self, ws: Any, session: CallSession) -> None:
+        noise_reduction = os.getenv("OPENAI_REALTIME_NOISE_REDUCTION", "near_field").strip().lower()
+        noise_reduction_config = None
+        if noise_reduction not in {"", "none", "null", "off", "false", "disabled"}:
+            if noise_reduction not in {"near_field", "far_field"}:
+                noise_reduction = "near_field"
+            noise_reduction_config = {"type": noise_reduction}
         payload = {
             "type": "session.update",
             "session": {
@@ -470,6 +476,7 @@ class OpenAIRealtimeClient:
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
+                        "noise_reduction": noise_reduction_config,
                         "transcription": {"model": "gpt-4o-transcribe"},
                         "turn_detection": None,
                     },
