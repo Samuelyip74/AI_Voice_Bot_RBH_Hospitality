@@ -69,6 +69,7 @@ RTP_SAMPLE_RATE = int(os.getenv("ARI_RTP_SAMPLE_RATE", "16000"))
 RTP_FRAME_BYTES = int(os.getenv("ARI_RTP_FRAME_BYTES", str(int(RTP_SAMPLE_RATE * 20 / 1000) * 2)))
 RTP_FRAME_SAMPLES = RTP_FRAME_BYTES // 2
 ARI_MEDIA_WEBSOCKET_PACE_OUTPUT = os.getenv("ARI_MEDIA_WEBSOCKET_PACE_OUTPUT", "true").strip().lower() in {"1", "true", "yes", "on"}
+ARI_MEDIA_WEBSOCKET_LATE_LOG_MS = float(os.getenv("ARI_MEDIA_WEBSOCKET_LATE_LOG_MS", "60"))
 ARI_OPENAI_GREETING_DELAY_MS = int(os.getenv("ARI_OPENAI_GREETING_DELAY_MS", "350"))
 ARI_POST_ANSWER_MEDIA_DELAY_MS = int(os.getenv("ARI_POST_ANSWER_MEDIA_DELAY_MS", "700"))
 ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS = float(os.getenv("ARI_GUEST_NO_RESPONSE_TIMEOUT_SECONDS", "18"))
@@ -261,6 +262,8 @@ class AriCallSession:
     media_optimal_frame_size: int = RTP_FRAME_BYTES
     media_ready: asyncio.Event = field(default_factory=asyncio.Event)
     media_can_send: asyncio.Event = field(default_factory=asyncio.Event)
+    media_next_send_at: float = 0.0
+    media_late_frames: int = 0
     rtp_port: int = 0
     rtp: RtpEndpoint | None = None
     rtp_remote: tuple[str, int] | None = None
@@ -715,7 +718,25 @@ class AriExternalMediaConcierge:
             )
         if ARI_MEDIA_WEBSOCKET_PACE_OUTPUT:
             frame_seconds = max(0.005, len(chunk) / (RTP_SAMPLE_RATE * media_bytes_per_sample())) if RTP_SAMPLE_RATE > 0 else 0.02
-            await asyncio.sleep(frame_seconds)
+            now = time.monotonic()
+            if call.media_next_send_at <= 0 or now - call.media_next_send_at > frame_seconds * 3:
+                call.media_next_send_at = now + frame_seconds
+                return
+            if call.media_next_send_at > now:
+                await asyncio.sleep(call.media_next_send_at - now)
+            else:
+                late_ms = (now - call.media_next_send_at) * 1000
+                call.media_late_frames += 1
+                if late_ms >= ARI_MEDIA_WEBSOCKET_LATE_LOG_MS:
+                    call.session.append_event(
+                        "ari_media_playout_late",
+                        {
+                            "late_ms": round(late_ms, 1),
+                            "late_frames": call.media_late_frames,
+                            "frame_size": len(chunk),
+                        },
+                    )
+            call.media_next_send_at += frame_seconds
 
     async def wait_before_initial_greeting(self, call: AriCallSession) -> None:
         try:

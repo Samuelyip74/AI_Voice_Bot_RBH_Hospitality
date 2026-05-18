@@ -27,13 +27,16 @@ local_net=${ASTERISK_LOCAL_NET}
 type=endpoint
 context=internal
 disallow=all
-allow=ulaw,alaw,slin16
+allow=ulaw,alaw
 direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 media_address=${ASTERISK_LAN_IP}
 dtmf_mode=rfc4733
+use_ptime=yes
+tos_audio=ef
+cos_audio=5
 
 [auth-userpass](!)
 type=auth
